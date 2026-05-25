@@ -50,16 +50,40 @@ export interface Artifact {
  * Server-Sent Events surface. The desktop subscribes to /api/events and
  * pattern-matches on `type` to update the local UI state.
  */
+export interface AgentOutputPayload {
+  lastOutputLine: string;
+  permissionMode: string | null;
+  outputVersion: number;
+  outputUpdatedAt: string;
+}
+
 export type ServerEvent =
-  | { type: 'agent.status_changed'; entity_id: string; payload: { status: AgentStatus } }
   | { type: 'agent.spawned'; entity_id: string; payload: Agent }
   | { type: 'agent.killed'; entity_id: string; payload: { id: string } }
+  | {
+      type: 'agent.status_changed';
+      entity_id: string;
+      payload: AgentOutputPayload & { status: AgentStatus; autoCorrect?: boolean };
+    }
+  /**
+   * The agent's tmux pane produced new output without a status change. The
+   * desktop sidebar uses this to flash a "this agent just spoke" indicator.
+   * No polling required.
+   */
+  | { type: 'agent.output_updated'; entity_id: string; payload: AgentOutputPayload }
   | { type: 'task.created'; entity_id: string; payload: Task }
   | { type: 'task.completed'; entity_id: string; payload: { task_id: string; success: boolean } }
   | { type: 'run.started'; entity_id: string; payload: { run_id: string; agent_id: string } }
-  | { type: 'run.finished'; entity_id: string; payload: { run_id: string; exit_code: number } }
+  | {
+      type: 'run.finished';
+      entity_id: string;
+      payload: { run_id: string; exit_code: number; duration_s?: number; changed_files?: string[] };
+    }
+  | { type: 'run.failed'; entity_id: string; payload: { run_id: string; error: string } }
   | { type: 'artifact.created'; entity_id: string; payload: Artifact }
-  | { type: 'artifact.deleted'; entity_id: string; payload: { id: string } };
+  | { type: 'artifact.deleted'; entity_id: string; payload: { id: string; filename: string; sha256: string } }
+  | { type: 'artifact.detached'; entity_id: string; payload: { agent_id: string; filename: string } }
+  | { type: 'heartbeat'; entity_id: string; payload: Record<string, never> };
 
 /**
  * Local-only types — describe the SSH connection profile the desktop holds.
