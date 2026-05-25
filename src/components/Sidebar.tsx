@@ -6,23 +6,17 @@
  */
 
 import { useUiStore } from '../stores/ui';
+import { useAgentsStore } from '../stores/agents';
 import type { Agent } from '../types/api';
-
-const SAMPLE_AGENTS: Agent[] = [
-  { id: '1', name: 'cl-backend', runtime: 'claude-code', tmux_session: 'wc-cl-backend', workspace: null, mode: 'spawned', status: 'working', created_at: '' },
-  { id: '2', name: 'cl-api', runtime: 'claude-code', tmux_session: 'wc-cl-api', workspace: null, mode: 'spawned', status: 'working', created_at: '' },
-  { id: '3', name: 'codex-tests', runtime: 'codex', tmux_session: 'wc-codex-tests', workspace: null, mode: 'spawned', status: 'idle', created_at: '' },
-  { id: '4', name: 'aider-docs', runtime: 'aider', tmux_session: 'wc-aider-docs', workspace: null, mode: 'spawned', status: 'idle', created_at: '' },
-  { id: '5', name: 'reviewer', runtime: 'claude-code', tmux_session: 'wc-reviewer', workspace: null, mode: 'spawned', status: 'working', created_at: '' },
-];
 
 export function Sidebar() {
   const { sidebarCollapsed, activeAgentId, setActiveAgent } = useUiStore();
+  const agents = useAgentsStore((s) => s.agents);
 
   if (sidebarCollapsed) {
     return (
       <aside className="w-14 border-r border-slate-800/60 flex flex-col items-center py-3 gap-3 shrink-0">
-        {SAMPLE_AGENTS.map((a) => (
+        {agents.map((a) => (
           <button
             key={a.id}
             onClick={() => setActiveAgent(a.id)}
@@ -42,12 +36,12 @@ export function Sidebar() {
     <aside className="w-[220px] border-r border-slate-800/60 flex flex-col shrink-0">
       <div className="px-3 pt-3 pb-2">
         <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
-          Agents ({SAMPLE_AGENTS.length})
+          Agents ({agents.length})
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2">
-        {SAMPLE_AGENTS.map((a) => (
+        {agents.map((a) => (
           <AgentRow
             key={a.id}
             agent={a}

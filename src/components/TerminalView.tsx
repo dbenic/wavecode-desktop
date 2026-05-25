@@ -16,6 +16,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { useUiStore } from '../stores/ui';
+import { useAgentsStore } from '../stores/agents';
 import { useConnectionStore } from '../stores/connection';
 import { usePtyChannel } from '../hooks/usePtyChannel';
 
@@ -24,6 +25,7 @@ export function TerminalView() {
   const [terminal, setTerminal] = useState<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const activeAgentId = useUiStore((s) => s.activeAgentId);
+  const getAgent = useAgentsStore((s) => s.getAgent);
   const { ptyCommand, setPtyCommand } = useConnectionStore();
 
   // Mount xterm once per component lifetime.
@@ -74,11 +76,14 @@ export function TerminalView() {
     };
   }, []);
 
-  // When activeAgentId changes (week 2 wiring), set the tmux attach command.
+  // When activeAgentId changes, look up the agent and attach to its real
+  // tmux session (NOT the id — id is opaque, session name is what tmux uses).
   useEffect(() => {
     if (!activeAgentId) return;
-    setPtyCommand(`tmux attach -t ${activeAgentId}`);
-  }, [activeAgentId, setPtyCommand]);
+    const agent = getAgent(activeAgentId);
+    if (!agent) return;
+    setPtyCommand(`tmux attach -t ${agent.tmux_session}`);
+  }, [activeAgentId, getAgent, setPtyCommand]);
 
   // Wire the PTY to the terminal once we have both.
   usePtyChannel({ terminal, command: ptyCommand });

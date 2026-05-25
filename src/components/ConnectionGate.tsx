@@ -12,34 +12,60 @@
  * key path) and persist profiles to OS config.
  */
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { useUiStore } from '../stores/ui';
 import { useConnectionStore } from '../stores/connection';
-import { tauri, toRustProfile } from '../lib/tauri';
+import { tauri, toRustProfile, type ServerProfileForRust } from '../lib/tauri';
+
+/**
+ * Module-level promise dedupes connect attempts across React StrictMode's
+ * dev-only double-mount. useState/useRef both reset across the unmount-
+ * remount cycle, but a module-level value persists, so the second
+ * effect run hits the cached promise instead of opening a new SSH session.
+ */
+let inFlightConnect: Promise<void> | null = null;
+
+function connectOnce(
+  profile: ServerProfileForRust,
+  onStatus: (s: 'connecting' | 'connected' | 'error') => void,
+  onError: (msg: string | null) => void,
+): Promise<void> {
+  if (inFlightConnect) return inFlightConnect;
+
+  onStatus('connecting');
+  onError(null);
+
+  inFlightConnect = (async () => {
+    try {
+      await tauri.sshConnect(profile);
+      onStatus('connected');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onError(msg);
+      onStatus('error');
+      // Clear so the user can retry via the Connect button
+      inFlightConnect = null;
+      throw e;
+    }
+  })();
+
+  return inFlightConnect;
+}
 
 export function ConnectionGate({ children }: { children: ReactNode }) {
   const { connectionStatus, setConnectionStatus, connectionError, setConnectionError } = useUiStore();
   const profile = useConnectionStore((s) => s.profile);
-  const [attempted, setAttempted] = useState(false);
 
   useEffect(() => {
-    if (attempted) return;
-    setAttempted(true);
-    void connect();
+    // No-op if already connected (e.g. after StrictMode remount or after
+    // the user clicked Connect manually).
+    if (connectionStatus === 'connected' || connectionStatus === 'connecting') return;
+    void connectOnce(toRustProfile(profile), setConnectionStatus, setConnectionError).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempted]);
+  }, []);
 
   async function connect() {
-    setConnectionStatus('connecting');
-    setConnectionError(null);
-    try {
-      await tauri.sshConnect(toRustProfile(profile));
-      setConnectionStatus('connected');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setConnectionError(msg);
-      setConnectionStatus('error');
-    }
+    await connectOnce(toRustProfile(profile), setConnectionStatus, setConnectionError).catch(() => {});
   }
 
   if (connectionStatus === 'connected') {
