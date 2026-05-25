@@ -2,15 +2,20 @@
 //  AgentTerminalView.swift
 //
 //  Embeds SwiftTerm to render an SSH PTY attached to the agent's tmux
-//  session. Native CoreText rendering, real OS clipboard, true colors,
-//  full terminal feel. NO web view, NO xterm.js.
+//  session. Native CoreText rendering, real OS clipboard, true colors.
+//  No web view, no xterm.js.
 //
-//  v0 stub: renders a placeholder SwiftTerm view. Real PTY wiring lands
-//  in week 1 alongside the Citadel SSH layer.
+//  The wiring:
+//    SwiftUI AgentTerminalView
+//      → TerminalHost (NSViewRepresentable, makes SwiftTerm.TerminalView)
+//        → TerminalCoordinator (TerminalViewDelegate)
+//          → ConnectionManager.openTerminalSession
+//            → TerminalSession (Citadel withTTY) → tmux attach -t <session>
 //
 
 import SwiftUI
 import SwiftTerm
+import AppKit
 
 struct AgentTerminalView: View {
     let agent: Agent
@@ -18,7 +23,7 @@ struct AgentTerminalView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header strip — agent name, status, elapsed
+            // Header strip — agent name, status, runtime
             HStack(spacing: 8) {
                 StatusDot(status: agent.status)
                 Text(agent.name)
@@ -28,6 +33,11 @@ struct AgentTerminalView: View {
                 Text(agent.runtime)
                     .foregroundStyle(.secondary)
                     .font(.caption)
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                Text("tmux: \(agent.tmuxSession)")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.tertiary)
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -36,7 +46,6 @@ struct AgentTerminalView: View {
 
             Divider()
 
-            // The terminal itself — wraps SwiftTerm's NSView in SwiftUI
             TerminalHost(tmuxSession: agent.tmuxSession)
         }
     }
@@ -58,8 +67,8 @@ struct AgentTerminalWindow: View {
 }
 
 /// SwiftUI wrapper around SwiftTerm's NSView. SwiftTerm is AppKit-based;
-/// we bridge via NSViewRepresentable. The actual SSH PTY hook-up lives
-/// in TerminalCoordinator (week 1 — currently a stub).
+/// we bridge via NSViewRepresentable. The PTY hook-up lives in
+/// TerminalCoordinator.
 struct TerminalHost: NSViewRepresentable {
     let tmuxSession: String
 
@@ -69,28 +78,33 @@ struct TerminalHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TerminalView {
         let view = TerminalView()
+        view.configureNativeColors()
         view.allowMouseReporting = true
+        view.terminalDelegate = context.coordinator
         context.coordinator.attach(to: view)
         return view
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {
-        // Re-attach if the underlying session changed
         if context.coordinator.tmuxSession != tmuxSession {
             context.coordinator.tmuxSession = tmuxSession
-            context.coordinator.attach(to: nsView)
+            context.coordinator.reattach(to: nsView)
         }
+    }
+
+    static func dismantleNSView(_ nsView: TerminalView, coordinator: TerminalCoordinator) {
+        coordinator.detach()
     }
 }
 
-/// Owns the SSH PTY channel for one terminal view. Bridges bytes
-/// between SwiftTerm and the Citadel SSH client.
-///
-/// v0 stub: writes a placeholder message into the terminal. Real PTY
-/// wiring lands in week 1 (see Networking/SSHClient.swift TODO).
-final class TerminalCoordinator: NSObject {
+/// Bridges SwiftTerm's TerminalView with a TerminalSession (SSH PTY).
+/// - Implements `TerminalViewDelegate` so keystrokes from the user
+///   get forwarded to the remote PTY.
+/// - Owns the lifetime of the TerminalSession.
+final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     var tmuxSession: String
     private weak var terminalView: TerminalView?
+    private var session: TerminalSession?
 
     init(tmuxSession: String) {
         self.tmuxSession = tmuxSession
@@ -98,15 +112,108 @@ final class TerminalCoordinator: NSObject {
 
     func attach(to view: TerminalView) {
         self.terminalView = view
-        let header = """
+        startSession()
+    }
 
-        \u{001B}[1;92m[WaveCode Desktop — v0 Swift]\u{001B}[0m
-        \u{001B}[90m  Would attach to tmux session: \(tmuxSession)\u{001B}[0m
-        \u{001B}[90m  SSH PTY wiring lands in week 1.\u{001B}[0m
+    func reattach(to view: TerminalView) {
+        self.terminalView = view
+        session?.close()
+        session = nil
+        startSession()
+    }
 
-        """
-        view.feed(text: header)
-        // TODO(week-1): open Citadel SSH channel, request PTY, exec
-        //               `tmux attach -t \(tmuxSession)`, pipe bytes both ways.
+    func detach() {
+        session?.close()
+        session = nil
+        terminalView = nil
+    }
+
+    private func startSession() {
+        let tmuxSession = self.tmuxSession
+        let command = "tmux attach -t \(tmuxSession)"
+
+        // We're not @MainActor; hop to it via Task. SwiftTerm's feed is
+        // safe off main but we keep all UI work on main to be safe.
+        Task { @MainActor in
+            self.terminalView?.feed(text: "\r\n\u{001B}[1;90m[attaching to tmux session: \(tmuxSession)]\u{001B}[0m\r\n")
+
+            do {
+                let manager = ConnectionManager.shared
+                guard manager.isConnected else {
+                    self.terminalView?.feed(text: "\r\n\u{001B}[31m[not connected — connect to the server first]\u{001B}[0m\r\n")
+                    return
+                }
+                let session = try manager.openTerminalSession(
+                    command: command,
+                    onBytes: { [weak self] bytes in
+                        guard let view = self?.terminalView else { return }
+                        // Bytes arrive on the SSH I/O task; SwiftTerm's
+                        // feed must be called on main.
+                        Task { @MainActor in
+                            view.feed(byteArray: bytes)
+                        }
+                    },
+                    onClosed: { [weak self] error in
+                        Task { @MainActor in
+                            let msg = error.map { "[session closed: \($0.localizedDescription)]" }
+                                ?? "[session closed]"
+                            self?.terminalView?.feed(text: "\r\n\u{001B}[90m\(msg)\u{001B}[0m\r\n")
+                        }
+                    }
+                )
+                self.session = session
+            } catch {
+                self.terminalView?.feed(text: "\r\n\u{001B}[31m[failed to open session: \(error.localizedDescription)]\u{001B}[0m\r\n")
+            }
+        }
+    }
+
+    // MARK: - TerminalViewDelegate
+
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        session?.send(data)
+    }
+
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        // TODO(week-2): wire to PTY window_change via Citadel — current
+        // withTTY API doesn't expose resize cleanly; revisit when
+        // refactoring to lower-level channel access.
+    }
+
+    func setTerminalTitle(source: TerminalView, title: String) {
+        // No-op for v0; future: bubble to AppState so windows pick it up.
+    }
+
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+
+    func scrolled(source: TerminalView, position: Double) {}
+
+    func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {
+        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+    }
+
+    func clipboardCopy(source: TerminalView, content: Data) {
+        guard let str = String(data: content, encoding: .utf8) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(str, forType: .string)
+    }
+
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+
+    func bell(source: TerminalView) {
+        NSSound.beep()
+    }
+
+    func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+}
+
+// MARK: - Visual tuning helpers
+
+private extension TerminalView {
+    func configureNativeColors() {
+        // Match WaveCode brand: dark slate background, emerald accents.
+        // SwiftTerm uses NSColor; tune to taste.
+        self.nativeBackgroundColor = NSColor(red: 0.008, green: 0.024, blue: 0.090, alpha: 1.0)  // slate-950
+        self.nativeForegroundColor = NSColor(red: 0.886, green: 0.910, blue: 0.941, alpha: 1.0)  // slate-200
     }
 }

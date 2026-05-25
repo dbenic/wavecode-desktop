@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 //
 // WaveCode Desktop — native macOS client for WaveCode.
 //
@@ -16,7 +16,10 @@ import PackageDescription
 let package = Package(
     name: "WaveCodeDesktop",
     platforms: [
-        .macOS(.v14), // Sonoma+ for modern SwiftUI + @Observable
+        // macOS 15 (Sequoia) needed for Citadel's `withTTY` bidirectional
+        // TTY API. Plus modern SwiftUI / @Observable / Span. Released Oct 2024;
+        // safe baseline for a 2026+ native app.
+        .macOS(.v15),
     ],
     products: [
         .executable(name: "WaveCodeDesktop", targets: ["WaveCodeDesktop"]),
@@ -37,12 +40,19 @@ let package = Package(
                 .product(name: "Citadel", package: "Citadel"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
-            path: "Sources/WaveCodeDesktop"
+            path: "Sources/WaveCodeDesktop",
+            swiftSettings: [
+                // Use Swift 5 language mode while Citadel + SwiftTerm haven't
+                // adopted strict Sendable annotations. Revisit when those
+                // libraries ship Swift 6 conformances.
+                .swiftLanguageMode(.v5),
+            ]
         ),
         .testTarget(
             name: "WaveCodeDesktopTests",
             dependencies: ["WaveCodeDesktop"],
-            path: "Tests/WaveCodeDesktopTests"
+            path: "Tests/WaveCodeDesktopTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
 )
