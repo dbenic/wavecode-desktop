@@ -4,83 +4,76 @@
 
 | Tool | Version | Why |
 |---|---|---|
-| Node.js | 22+ | Frontend toolchain (Vite, TS, React) |
-| Rust | 1.77+ stable | Tauri shell + SSH client |
-| Xcode CLI tools | macOS only | Code-signing + native deps |
-| `pkg-config`, `libgtk` etc. | Linux only | Tauri webview deps |
-| WiX 3.x | Windows only | MSI bundling |
+| macOS | 14 (Sonoma) or later | Min platform target |
+| Xcode | 15.0+ | Swift 5.10+ toolchain, AppKit/SwiftUI headers |
+| Xcode Command Line Tools | matching Xcode | `swift`, `xcodebuild` from CLI |
 
-Install Rust:
+Verify:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Install Node deps:
-
-```sh
-npm install
+swift --version       # >= 5.10
+xcodebuild -version   # Xcode 15+
 ```
 
 ## Run in dev mode
 
 ```sh
-npm run tauri:dev
+git clone https://github.com/dbenic/wavecode-desktop.git
+cd wavecode-desktop
+swift run
 ```
 
-This starts Vite on `http://localhost:1420`, compiles the Rust shell, and
-opens a native window. Hot-reload works for both React (instant) and Rust
-(rebuild + restart).
+First build downloads dependencies (SwiftTerm, Citadel + transitive
+NIO/Crypto stack). Subsequent builds are fast.
+
+## Open in Xcode
+
+Xcode auto-detects `Package.swift`:
+
+```sh
+open Package.swift
+```
+
+You get full IDE: source navigator, breakpoints, live previews for
+SwiftUI views, profiling, the works.
+
+## Running tests
+
+```sh
+swift test
+```
 
 ## Production build
 
-```sh
-npm run tauri:build
-```
+For a signed `.app` bundle suitable for distribution, we'll add an
+Xcode project wrapper in week 7. For now, `swift build -c release`
+produces an executable at `.build/release/WaveCodeDesktop` that runs
+but isn't a proper app bundle (no Info.plist, no app icon, no
+code-signing).
 
-Outputs into `src-tauri/target/release/bundle/`:
+## Code-signing & notarization (future)
 
-- `macos/WaveCode Desktop.app` (+ `.dmg`)
-- `msi/WaveCode-Desktop_x.y.z_x64_en-US.msi` (Windows)
-- `appimage/`, `deb/` (Linux)
+For distribution outside the App Store you need:
+- Developer ID Application certificate ($99/yr)
+- Notarization via `notarytool`
 
-## Code-signing (macOS)
+The Xcode project wrapper (TBA in week 7) will codify this.
 
-For distribution outside the App Store you need a Developer ID Application
-certificate ($99/yr) and to notarize the build:
+## Running against a local WaveCode server
 
-```sh
-export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export APPLE_ID="you@example.com"
-export APPLE_PASSWORD="@keychain:AC_PASSWORD"
-export APPLE_TEAM_ID="TEAMID"
-npm run tauri:build
-```
-
-Tauri will sign + notarize during the bundle step.
-
-## CI
-
-The repo ships a GitHub Actions workflow at `.github/workflows/release.yml`
-(TBA) that triggers on tags `v*.*.*` and produces signed artifacts for
-macOS, Windows, and Linux as a GitHub Release.
-
-## Running against a local WaveCode server (for development)
-
-When developing the app you usually want to connect to a local WaveCode
-daemon rather than a remote server. Two options:
-
-**Option A — run WaveCode locally** in the sibling `WaveCode/` repo:
+When developing the app, easiest path: run WaveCode locally and add a
+profile pointing at `localhost`.
 
 ```sh
-cd ../WaveCode && npm run dev
+# In the sibling WaveCode/ repo:
+cd ../wavecode
+npm run dev
+
+# Then in the Desktop Settings, configure:
+#   SSH host: localhost
+#   SSH port: 22 (System Settings → Sharing → Remote Login must be on)
+#   WaveCode port: 3777
 ```
 
-Then add a profile in WaveCode Desktop with `ssh_host: localhost`. You
-SSH to your own machine via loopback. Make sure `sshd` is enabled in
-System Settings → Sharing → Remote Login.
-
-**Option B — port-forward to a real WaveCode server.** Works fine; just
-slower iteration when you also need to change server code.
-
-Recommended for v0 dev: Option A.
+Alternatively, just point the default `wave` profile at your real
+WaveCode server.

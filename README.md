@@ -1,85 +1,111 @@
 # WaveCode Desktop
 
-Native desktop client for [WaveCode](https://github.com/dbenic/wavecode) — an
-open-source multi-agent orchestrator for CLI coding agents.
+Premium native macOS client for [WaveCode](https://github.com/dbenic/wavecode) —
+an open-source multi-agent orchestrator for CLI coding agents.
 
-WaveCode Desktop gives you a **tmux-first work surface** with rich desktop
-affordances (drag-drop, native notifications, instant agent switching, command
-palette) without giving up the SSH/tmux experience you already use. All agents
-run on a remote server you control; the desktop app is a thin, fast lens on
-top.
+Built in Swift / SwiftUI with **SwiftTerm** (CoreText-rendered native
+terminal) and **Citadel** (pure-Swift SSH). No Electron, no webview, no
+xterm.js. The terminal feels like Terminal.app / Ghostty / iTerm — because
+it's rendered the same way they are.
 
-> **SSH-only by design.** WaveCode Desktop never runs agents locally — your
-> laptop sleeps, your server doesn't. The app connects to a remote WaveCode
-> instance over a single SSH connection that multiplexes the HTTP/SSE API,
-> tmux PTYs, and SFTP file uploads.
+> **SSH-only by design.** WaveCode Desktop never runs agents locally —
+> your laptop sleeps, your server doesn't. One SSH connection multiplexes
+> the WaveCode HTTP/SSE API, tmux PTYs, and SFTP file uploads.
+>
+> **One app, multiple windows.** Per-agent terminal windows can be opened
+> across multiple monitors. The control window stays focused on what
+> matters: agents, artifacts, drop zone, palette.
 
 ## Status
 
-Pre-alpha. The architecture is settled; the v0 is being built.
+Pre-alpha. v0 scaffold is in place; the SSH/PTY foundation lands in
+week 1, multi-window per agent + drag-drop in week 2-3.
 
-## What's the point?
+## Why a native Mac app
 
-The WaveCode web PWA is great for mobile and casual monitoring. For deep
+The WaveCode web PWA is good for mobile and casual monitoring. For deep
 desk work it has friction: drag-drop is finicky, you can't paste images
-without ceremony, notifications are weak, switching between agents is
-slower than it should be, and the dashboard sits in a browser tab that gets
-suspended when your laptop sleeps.
+without ceremony, notifications are weak, the terminal lags under heavy
+output, and the dashboard sits in a browser tab that gets suspended when
+your laptop sleeps.
 
-The desktop app fixes those papercuts by treating the **real tmux session
-as the work surface** and wrapping it in native chrome:
+The native macOS app fixes that by:
 
-- **Drag a screenshot from Finder** → uploaded as artifact, path injected at
-  the tmux cursor. One gesture instead of seven.
-- **Sidebar with live agent status** — green/amber/red dots, always visible
-  while you work.
-- **⌘+1/2/3** — instant agent switching, faster than `tmux select-window`.
-- **⌘K command palette** — spawn, dispatch, search, jump.
-- **⌘F search** across all agent transcripts at once.
-- **Native macOS notifications** when long-running agents finish, with reply
-  actions.
-- **Multi-monitor** — pin a different agent per window.
-- **Multi-server** — switch between personal, staging, prod servers like
-  Slack workspaces.
+- **CoreText terminal rendering** — sharp HiDPI fonts, real OS clipboard,
+  smooth scrolling under heavy output, native selection
+- **Multi-window** — open each agent in its own NSWindow, spread across
+  monitors, tabbed natively
+- **Drag screenshot from Finder** → uploaded as artifact, path injected
+  at the tmux cursor
+- **Sidebar with live agent status** — green/amber/red dots driven by
+  SSE, always visible
+- **⌘K command palette** — spawn, dispatch, search, jump
+- **Native macOS notifications** with reply actions when agents finish
+- **Spotlight indexing** of agent transcripts (later)
+- **Native menu bar status app** (later) — ambient awareness without
+  needing the main window open
 
-The web PWA stays as the mobile/anywhere surface. The desktop app is what
+The web PWA stays as the mobile/anywhere surface. The native app is what
 you reach for at your desk.
 
 ## Architecture
 
 ```
-   Mac (Desktop app)                          Server (any reachable host)
-┌──────────────────────────┐               ┌───────────────────────────────────┐
-│  Sidebar (React)         │               │   ┌─────────────────────────┐    │
-│  Terminal (xterm.js)     │               │   │ WaveCode daemon         │    │
-│  SSH client (russh)      │═══════════════│═══│  Hono + SQLite + agents │    │
-│   ├── HTTP port-forward  │  ONE SSH      │   └────────┬────────────────┘    │
-│   ├── PTY channel        │  CONNECTION   │   ┌────────┴────────────────┐    │
-│   └── SFTP channel       │               │   │  tmux sessions          │    │
-└──────────────────────────┘               │   └─────────────────────────┘    │
-                                           └───────────────────────────────────┘
+   Your Mac                                   Server (any reachable host)
+┌─────────────────────────────┐             ┌──────────────────────────────┐
+│  SwiftUI app                │             │   ┌──────────────────────┐   │
+│   ├ Main window             │             │   │  WaveCode daemon     │   │
+│   │   ├ Sidebar (agents)    │             │   │  Hono + SQLite       │   │
+│   │   └ Workspace pane      │             │   └──────────┬───────────┘   │
+│   ├ Per-agent windows       │             │              │                │
+│   │   (SwiftTerm × N)       │             │   ┌──────────┴───────────┐   │
+│   └ Settings, palette       │             │   │  tmux sessions       │   │
+│                             │             │   │   - cl-backend        │   │
+│  Citadel SSH client         │═════════════│═══│   - cl-api            │   │
+│   ├ Port-forward → :3777    │  ONE SSH    │   │   - codex-tests       │   │
+│   ├ PTY channels (per agent)│  CONNECTION │   │   ...                 │   │
+│   └ SFTP (drag-drop)        │             │   └──────────────────────┘   │
+└─────────────────────────────┘             └──────────────────────────────┘
 ```
 
-One SSH connection multiplexes three channels:
-
-1. **HTTP/SSE port-forward** — talk to the WaveCode API via `localhost:3777`
-   as if it were local
-2. **PTY channel** — `tmux attach` rendered in xterm.js
-3. **SFTP channel** — file uploads land in agent workspaces
-
-One auth, one connection, one trust boundary. See
-[`docs/architecture.md`](docs/architecture.md) for details.
+One SSH connection multiplexes three channels — see
+[`docs/architecture.md`](docs/architecture.md) for the full design.
 
 ## Requirements
 
-- macOS 14+ / Windows 10+ / Linux (modern distro)
+- **macOS 14 (Sonoma)** or later
 - A running [WaveCode](https://github.com/dbenic/wavecode) server you can
   SSH into
-- An `~/.ssh/config` entry for that server (or app-managed credentials)
+- An `~/.ssh/config` entry for that server, or app-managed credentials
 
-## Building from source
+## Building
 
-See [`docs/building.md`](docs/building.md).
+```sh
+git clone https://github.com/dbenic/wavecode-desktop.git
+cd wavecode-desktop
+swift run
+```
+
+For Xcode IDE experience: open the directory in Xcode (auto-detects
+`Package.swift`).
+
+See [`docs/building.md`](docs/building.md) for code-signing and
+distribution setup.
+
+## Cross-platform
+
+WaveCode Desktop is macOS-only by design — it leans hard into native
+AppKit/SwiftUI and CoreText for the premium feel.
+
+Linux and Windows users:
+
+- The [WaveCode web PWA](https://github.com/dbenic/wavecode) (bundled in
+  the core repo) is the cross-platform answer — runs in any modern
+  browser, mobile-friendly.
+- A Tauri+xterm.js reference implementation lives on the
+  [`tauri-archive` branch](https://github.com/dbenic/wavecode-desktop/tree/tauri-archive)
+  of this repo (tagged `v0.0.1-tauri`). It's not maintained but works
+  cross-platform if you want to fork it.
 
 ## Related projects
 

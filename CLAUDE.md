@@ -6,9 +6,11 @@
 
 ## What this is
 
-A native desktop client for [WaveCode](https://github.com/dbenic/wavecode).
-The desktop app is **a client of a remote WaveCode server**, not a local
-runtime for agents.
+A **native macOS** client for [WaveCode](https://github.com/dbenic/wavecode).
+Built in Swift / SwiftUI with SwiftTerm (CoreText terminal renderer) and
+Citadel (pure-Swift SSH). **No Electron, no webview, no xterm.js.** The
+client connects to a remote WaveCode server over SSH and renders the
+remote tmux PTYs in native NSViews.
 
 ## Non-negotiable architectural constraints
 
@@ -19,8 +21,8 @@ user's machine, never calls the Anthropic/OpenAI APIs directly. All work
 happens on a remote server the user controls. The app connects over a
 single SSH connection that multiplexes three channels:
 
-- **Port-forwarded HTTP/SSE** (`localhost:3777` → server's WaveCode daemon)
-- **PTY channel** for `tmux attach` rendered in xterm.js
+- **Port-forwarded HTTP/SSE** (`localhost:<dyn>` → server's WaveCode daemon)
+- **PTY channels** for `tmux attach` rendered in SwiftTerm
 - **SFTP channel** for drag-drop artifact uploads
 
 If you find yourself wanting to add a "local fallback" or "offline mode" or
@@ -38,12 +40,12 @@ write.
 
 ### 3. Tmux is the work surface, not a rendered abstraction.
 
-The terminal area of the app embeds a real PTY connected to a real tmux
-session on the server. We don't reimplement terminal logic, don't fake
-the cursor, don't replace tmux's window/pane model with our own. The
-sidebar and chrome are *additive* — they let you switch agents, drop
-files, search, etc. — but every action ultimately translates to a real
-operation on the real tmux session.
+The terminal area embeds SwiftTerm rendering a real PTY connected to a
+real tmux session on the server. We don't reimplement terminal logic,
+don't fake the cursor, don't replace tmux's window/pane model with our
+own. The sidebar and chrome are *additive* — they let you switch agents,
+drop files, search, etc. — but every action ultimately translates to a
+real operation on the real tmux session.
 
 Rule of thumb: if a UI interaction can't be expressed as either an HTTP
 call to the WaveCode API or a `tmux send-keys`/`tmux select-window`
@@ -60,101 +62,155 @@ command on the server, it's probably the wrong design.
 This keeps the trust model identical to "I SSH into this server" — which
 the user already does and already trusts.
 
-### 5. Cross-platform from day one.
+### 5. Native, not web. Multi-window, not single.
 
-Tauri + xterm.js + React works on macOS, Windows, and Linux. Don't write
-macOS-only code paths unless the alternative is genuinely impossible. If
-you find yourself reaching for AppKit-only APIs, find the Tauri or
-web-platform equivalent first.
+This is a **native macOS app**. No web views for primary UI. SwiftUI for
+the main UI, AppKit where SwiftUI falls short (NSWindow management,
+deep drag-drop, menu bar items).
+
+Multi-window is a first-class pattern, not an afterthought:
+- One main control window (sidebar + workspace pane)
+- Optional per-agent terminal windows (`WindowGroup(id: "agent", for: String.self)`)
+- Settings as a standard macOS settings window
+- Future: menu bar status app
+
+Don't try to cram everything into one window. macOS users expect to
+spread work across monitors and Mission Control spaces.
+
+### 6. macOS-only is fine.
+
+The cross-platform answer is the WaveCode PWA in the core repo. This
+app is the **premium native tier** for macOS. Don't dilute it by trying
+to be cross-platform via abstraction layers — that's how Mac apps end up
+feeling foreign.
+
+If a Windows/Linux native client is ever built, it should be a separate
+repo with the same SSH/SSE protocol contract.
 
 ## Tech stack
 
 | Layer | Choice | Why |
 |---|---|---|
-| Shell | Tauri 2.x | Native windows + native APIs, ~15 MB binary, cross-platform |
-| Native logic | Rust | Tauri requirement; needed for SSH layer anyway |
-| SSH | `russh` + `russh-keys` + `russh-sftp` | Modern async Rust SSH stack |
-| UI | React 19 + TypeScript | Reuse skills/components from WaveCode core PWA |
-| Terminal | xterm.js + addon-fit + addon-search | Industry standard (VS Code, Warp use it) |
-| Styling | Tailwind CSS | Same as WaveCode core; no custom CSS files |
-| State | Zustand for UI, server is source of truth for everything else | Minimal |
-| Command palette | `cmdk` | Battle-tested headless component |
-| Notifications | `tauri-plugin-notification` | Native per-OS |
-| Global hotkeys | `tauri-plugin-global-shortcut` | ⌘+1..9, ⌘K, ⌘N, ⌘F |
-| Auto-update | `tauri-plugin-updater` | GitHub Releases as the channel |
+| Min OS | macOS 14 (Sonoma) | `@Observable`, modern SwiftUI, no need to support ancient versions |
+| Language | Swift 5.10+ | Standard for macOS-native |
+| UI | SwiftUI primarily, AppKit where needed | Modern declarative + native interop |
+| State | `@Observable` (Observation framework) | Replaces ObservableObject/StateObject |
+| Terminal | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (Apache 2.0) | CoreText-native, AppKit `TerminalView`, production-mature |
+| SSH | [Citadel](https://github.com/orlandos-nl/Citadel) (MIT) | Pure-Swift async/await SSH; no libssh2 baggage |
+| Build | SwiftPM via `Package.swift` | Open-source-friendly; Xcode opens it natively |
+| Persistence | UserDefaults (prefs), macOS Keychain (tokens), no DB | Server is source of truth |
+| Tests | XCTest | Standard |
 
 ## Project layout (target)
 
 ```
 wavecode-desktop/
-├── src-tauri/              Rust + Tauri shell
-│   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   └── src/
-│       ├── main.rs
-│       ├── ssh.rs          russh client + reconnect loop
-│       ├── pty.rs          PTY channel management (one per agent view)
-│       ├── port_forward.rs HTTP API tunnel
-│       ├── sftp.rs         drag-drop uploads
-│       └── commands.rs     Tauri command bridge (frontend ↔ Rust)
-├── src/                    React frontend
-│   ├── main.tsx
-│   ├── App.tsx
-│   ├── components/
-│   ├── hooks/
-│   ├── stores/
-│   ├── types/api.ts        hand-copied from WaveCode core (v0 only)
-│   └── styles/tailwind.css
-├── docs/
-│   ├── architecture.md
-│   ├── building.md
-│   └── distribution.md
-└── scripts/
+├── Package.swift                            SPM manifest
+├── Sources/WaveCodeDesktop/
+│   ├── WaveCodeDesktopApp.swift             @main, WindowGroups, commands
+│   ├── Models/
+│   │   ├── Agent.swift                      hand-translated from WaveCode API
+│   │   ├── ServerProfile.swift              SSH connection profile
+│   │   └── ...
+│   ├── Networking/
+│   │   ├── ConnectionManager.swift          owns SSH session
+│   │   ├── SSHClient.swift                  Citadel wrapper (week 1)
+│   │   ├── PortForward.swift                TCP forward for WaveCode API (week 2)
+│   │   ├── WaveCodeAPI.swift                URLSession HTTP client (week 2)
+│   │   └── SSEClient.swift                  Server-sent events (week 2)
+│   ├── Terminal/
+│   │   ├── TerminalCoordinator.swift        bridges SwiftTerm ↔ SSH PTY
+│   │   └── PTYChannel.swift                 SSH PTY lifecycle
+│   ├── UI/
+│   │   ├── MainWindow.swift
+│   │   ├── Sidebar.swift
+│   │   ├── AgentTerminalView.swift          wraps SwiftTerm NSView in SwiftUI
+│   │   ├── ConnectionGate.swift
+│   │   ├── DropZone.swift
+│   │   ├── CommandPalette.swift
+│   │   └── SettingsView.swift
+│   ├── State/
+│   │   └── AppState.swift                   @Observable, holds UI state
+│   └── Util/
+│       ├── KeychainHelper.swift
+│       └── ...
+├── Tests/WaveCodeDesktopTests/
+└── docs/
+    ├── architecture.md
+    └── building.md
 ```
 
 ## Conventions
 
-- **IDs**: agents/tasks/etc come from the server pre-formed (ULIDs). Don't generate locally.
-- **Errors**: never throw from async Rust commands. Return `Result<T, String>` and surface to the React side as toasts/inline errors.
-- **Logging**: `tracing` on the Rust side, `console` for now on the React side.
-- **File paths**: always `std::path::PathBuf` in Rust, `path.join` / `URL` in TS. No string concat.
-- **Tests**: cargo test on Rust, vitest on TS. Co-locate tests with source.
-- **CSS**: Tailwind utility classes only. No custom CSS files (mirrors WaveCode core).
-- **Naming**: snake_case Rust, camelCase TS variables, PascalCase TS components, kebab-case files.
+- **IDs**: ULIDs from the server; never generate locally.
+- **Errors**: use `Result<T, Error>` or `throws` async functions; surface
+  to the UI as user-readable strings.
+- **Logging**: `OSLog` / `Logger` from `os` framework — appears in
+  Console.app and the unified log system.
+- **File paths**: `URL` always; never raw `String` concatenation.
+- **Tests**: XCTest co-located in `Tests/WaveCodeDesktopTests/`; run via
+  `swift test`.
+- **Naming**: standard Swift (`camelCase` properties/functions,
+  `PascalCase` types).
+- **JSON keys**: server uses snake_case (`tmux_session`); map via
+  `CodingKeys` enums on the Swift side.
 
 ## What NOT to do
 
-- ❌ Don't add a local SQLite or any local persistent state beyond UI prefs.
-- ❌ Don't add an LLM SDK dependency to the desktop. LLM calls happen on the server.
-- ❌ Don't reimplement terminal logic. Use xterm.js as-is.
+- ❌ Don't add a `WKWebView` or any embedded web view for primary UI.
+- ❌ Don't add SQLite or any local persistent store beyond UI prefs.
+- ❌ Don't add an LLM SDK dependency. LLM calls happen on the server.
+- ❌ Don't reimplement terminal logic. Use SwiftTerm as-is.
 - ❌ Don't build a "local agent mode" or "offline mode" — see constraint #1.
-- ❌ Don't import from the WaveCode core repo directly. Hand-copy types for v0; formalize a published `@wavecode/api-types` package later.
-- ❌ Don't add a custom title bar in v0. Use native macOS chrome.
-- ❌ Don't use `localStorage` for anything sensitive. macOS Keychain for tokens, plain config files for non-sensitive UI prefs.
-- ❌ Don't write CSS files. Tailwind only.
+- ❌ Don't import from the WaveCode core repo directly. Hand-translate
+  types for v0; formalize a published Swift package later.
+- ❌ Don't try to render multiple agent terminals in a single window via
+  custom tab logic — use the OS's `WindowGroup` pattern with multiple
+  windows.
+- ❌ Don't store secrets in UserDefaults — Keychain only.
+- ❌ Don't use `print` for logging — use `Logger`.
 
 ## Build order (v0)
 
-1. **Week 1**: Tauri window + russh SSH connection + xterm.js rendering one
-   attached tmux session.
-2. **Week 2**: HTTP port-forward + React sidebar consuming SSE + agent
-   switching via `tmux select-window`.
-3. **Week 3**: Drag-drop → SFTP upload → artifact API → path injection at
-   cursor. **(Hero demo.)**
-4. **Week 4**: Multi-server profile management + robust reconnect across
-   sleep/wake.
-5. **Week 5–6**: ⌘K palette, ⌘F search, native notifications,
-   code-signing, GitHub Releases pipeline.
+1. **Week 1** — Citadel SSH client + PTY channel + SwiftTerm bidirectional
+   wire. One agent terminal renders a real remote tmux session.
+2. **Week 2** — Port-forward + URLSession HTTP client + SSE consumer. The
+   sidebar shows the *real* live agent list with live status dots.
+3. **Week 3** — Drag-drop → SFTP upload → artifact API → tmux send-keys.
+   **Hero demo.**
+4. **Week 4** — Multi-window: per-agent terminal windows opened via
+   ⌘⏎ on a sidebar agent or "Open in new window" menu.
+5. **Week 5** — Server profile management UI, OS Keychain integration,
+   reconnect supervisor for sleep/wake.
+6. **Week 6** — Command palette (⌘K), notifications, search across
+   transcripts.
+7. **Week 7+** — Polish, code-signing, notarization, .dmg distribution,
+   Sparkle auto-update.
 
 ## Relationship to WaveCode core
 
-The two repos are peers. Core is the platform; Desktop is one client of
-many. Other clients that may exist or arrive:
+This is a peer client to the WaveCode core server. Other clients exist or
+may arrive:
 
-- WaveCode PWA (in the core repo) — mobile-friendly, casual monitoring
+- WaveCode PWA (in the core repo) — mobile + cross-platform, casual
 - WaveCode CLI (in the core repo) — scripting and CI integration
-- Hypothetical: VS Code extension, iOS app, Slack bot, etc.
+- Hypothetical: VS Code extension, iOS app, Slack bot
 
-The contract between them is **the HTTP/SSE API documented in
+The contract is the **HTTP/SSE API documented in
 `wavecode/docs/api.md`**. If you need to change the contract, the change
 goes in the core repo first and lands in `docs/api.md`. Desktop follows.
+
+## Why not Tauri / Electron / webview-based?
+
+We tried Tauri + xterm.js first (preserved on the `tauri-archive`
+branch). It worked but the embedded web terminal had real limitations
+vs. native:
+- xterm.js doesn't support Kitty/iTerm image protocols
+- Heavy output (e.g. `cargo check` floods) is visibly laggier than native
+- Font rendering is webview-grade, not CoreText-sharp
+- OS clipboard interop has more edge cases
+- macOS multi-window from Tauri is rough (focus, fullscreen, Stage Manager)
+
+The user wanted native feel from day one. We pivoted to Swift. The Tauri
+work proved out the SSH protocol shape; that knowledge transferred. The
+embedded-terminal decision was the wrong one to keep.
