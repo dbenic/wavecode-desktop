@@ -1,38 +1,51 @@
 //! SSH connection layer — the foundation of everything.
 //!
 //! One process-wide SSH connection per active server profile. The connection
-//! multiplexes:
-//!   - PTY channels for tmux attach (one per agent terminal view)
-//!   - A TCP forward for the WaveCode HTTP/SSE API
-//!   - An SFTP channel for file uploads
+//! multiplexes PTY channels (for tmux attach), TCP forwards (for the
+//! WaveCode HTTP/SSE API), and SFTP (for file uploads). This module owns
+//! the connection state and exposes a small Tauri-friendly surface for
+//! opening channels.
 //!
-//! v0 stub: types and a no-op `connect` so the rest of the app can compile
-//! and the Rust ↔ JS bridge can be wired. Real russh implementation lands
-//! in week 1.
-//!
-//! The connection must be **resilient to laptop sleep / network churn**.
-//! When the SSH session dies we surface a status change to the frontend and
-//! retry with exponential backoff. Tmux sessions on the server keep running
-//! while we're disconnected, so re-attaching after reconnect is loss-free.
+//! v0 (week 1) — Phase A: real russh handshake + keyfile auth.
+//! Multiplexed PTY channels work; port-forward and SFTP land in weeks 2-3.
 
+use async_trait::async_trait;
+use russh::client::{self, Handle, Handler, Msg};
+use russh::keys::key::{KeyPair, PublicKey};
+use russh::keys::load_secret_key;
+use russh::{Channel, ChannelId};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tracing::{info, warn};
 
-/// A user-configured server profile. The desktop stores a list of these in
-/// the OS keychain / config dir. Selecting one triggers a `connect`.
+/// User-configured server profile. Persisted client-side; never sent to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerProfile {
-    /// Local id (ulid). Stable across renames.
     pub id: String,
-    /// User-facing label, e.g. "wave (personal)".
     pub label: String,
-    /// Either an `~/.ssh/config` alias or a raw hostname/IP.
     pub ssh_host: String,
-    /// Optional user override (defaults to `~/.ssh/config` or current user).
     pub ssh_user: Option<String>,
-    /// Optional port override (defaults to 22 or `~/.ssh/config` value).
     pub ssh_port: Option<u16>,
-    /// The port the WaveCode daemon listens on, server-side. Default 3777.
+    /// Server-side WaveCode HTTP port. Default 3777.
     pub wavecode_port: u16,
+    /// Optional explicit private key path. If unset we try default key
+    /// locations under `~/.ssh/`.
+    pub identity_file: Option<String>,
+}
+
+impl ServerProfile {
+    pub fn port(&self) -> u16 {
+        self.ssh_port.unwrap_or(22)
+    }
+    pub fn user(&self) -> String {
+        self.ssh_user
+            .clone()
+            .or_else(|| std::env::var("USER").ok())
+            .unwrap_or_else(|| "root".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,41 +60,177 @@ pub enum ConnectionStatus {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
-    #[error("SSH connection failed: {0}")]
+    #[error("ssh connection failed: {0}")]
     Connection(String),
     #[error("authentication failed: {0}")]
     Auth(String),
     #[error("channel error: {0}")]
     Channel(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("not connected")]
     NotConnected,
 }
 
-/// Top-level handle to the SSH connection. Future: owns a russh `Handle`,
-/// channel registry, port-forward task, reconnect supervisor.
-pub struct SshConnection {
-    pub profile: ServerProfile,
-    pub status: ConnectionStatus,
+/// Minimal russh client handler. v0: trust on first use (always accept the
+/// server key). Future: load `~/.ssh/known_hosts` and prompt on mismatch.
+pub struct WaveClient;
+
+#[async_trait]
+impl Handler for WaveClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
+        // TODO(security): validate against ~/.ssh/known_hosts
+        Ok(true)
+    }
 }
 
-impl SshConnection {
-    /// Construct a connection in the `Disconnected` state. Call `connect`
-    /// to actually establish the SSH session.
-    pub fn new(profile: ServerProfile) -> Self {
-        Self {
-            profile,
-            status: ConnectionStatus::Disconnected,
+/// Active SSH session — wraps a russh `Handle` and lets us open channels.
+pub struct SshSession {
+    pub profile: ServerProfile,
+    pub handle: Handle<WaveClient>,
+}
+
+impl SshSession {
+    /// Open a PTY channel and run a command on it. Returns the russh
+    /// Channel + its id, which the caller uses to pump data and dispatch
+    /// keystrokes / resize events.
+    pub async fn open_pty_exec(
+        &self,
+        cols: u32,
+        rows: u32,
+        command: &str,
+    ) -> Result<(Channel<Msg>, ChannelId), SshError> {
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::Channel(e.to_string()))?;
+        let id = channel.id();
+
+        channel
+            .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+            .await
+            .map_err(|e| SshError::Channel(format!("pty request: {e}")))?;
+
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| SshError::Channel(format!("exec: {e}")))?;
+
+        Ok((channel, id))
+    }
+}
+
+/// Connection state shared across the Tauri app. Held in `tauri::State`.
+#[derive(Default)]
+pub struct ConnectionState {
+    pub session: Mutex<Option<SshSession>>,
+}
+
+impl ConnectionState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Establish the SSH session. Replaces any existing session.
+    pub async fn connect(&self, profile: ServerProfile) -> Result<(), SshError> {
+        info!(host = %profile.ssh_host, port = profile.port(), "ssh: connecting");
+
+        let config = Arc::new(client::Config {
+            inactivity_timeout: Some(Duration::from_secs(60)),
+            ..client::Config::default()
+        });
+
+        let addr = format!("{}:{}", profile.ssh_host, profile.port());
+        let mut handle = client::connect(config, addr.as_str(), WaveClient)
+            .await
+            .map_err(|e| SshError::Connection(e.to_string()))?;
+
+        // Auth: explicit identity_file first, then default ~/.ssh/ keys.
+        // ssh-agent integration is TODO for week 1B.
+        let user = profile.user();
+        let authed =
+            try_authenticate(&mut handle, &user, profile.identity_file.as_deref()).await?;
+
+        if !authed {
+            return Err(SshError::Auth(
+                "no usable credentials (identity_file or ~/.ssh/id_{ed25519,rsa,ecdsa})".into(),
+            ));
+        }
+
+        info!("ssh: authenticated as {user}");
+        let session = SshSession { profile, handle };
+        *self.session.lock().await = Some(session);
+        Ok(())
+    }
+
+    pub async fn disconnect(&self) -> Result<(), SshError> {
+        let mut guard = self.session.lock().await;
+        if let Some(s) = guard.take() {
+            // Best effort — ignore errors.
+            let _ = s
+                .handle
+                .disconnect(russh::Disconnect::ByApplication, "bye", "")
+                .await;
+        }
+        Ok(())
+    }
+}
+
+/// Walk our preferred auth chain. Returns true on first success.
+async fn try_authenticate(
+    handle: &mut Handle<WaveClient>,
+    user: &str,
+    explicit_key: Option<&str>,
+) -> Result<bool, SshError> {
+    if let Some(path) = explicit_key {
+        if try_keyfile(handle, user, path.into()).await? {
+            return Ok(true);
         }
     }
 
-    /// Establish the SSH session. v0 stub: returns Ok without doing
-    /// anything. Week 1 lands the real russh handshake here.
-    pub async fn connect(&mut self) -> Result<(), SshError> {
-        tracing::info!(host = %self.profile.ssh_host, "ssh: would connect (stub)");
-        self.status = ConnectionStatus::Connecting;
-        // TODO(week-1): russh handshake, auth via ssh-agent / keyfile
-        // TODO(week-1): start port-forward task (server:wavecode_port → local:?)
-        // TODO(week-1): start reconnect supervisor
-        Ok(())
+    if let Some(home) = dirs::home_dir() {
+        for name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
+            let path = home.join(".ssh").join(name);
+            if path.exists() && try_keyfile(handle, user, path).await? {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+async fn try_keyfile(
+    handle: &mut Handle<WaveClient>,
+    user: &str,
+    path: PathBuf,
+) -> Result<bool, SshError> {
+    let key: KeyPair = match load_secret_key(&path, None) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(?path, error = %e, "ssh: skipping unreadable key");
+            return Ok(false);
+        }
+    };
+
+    match handle.authenticate_publickey(user, Arc::new(key)).await {
+        Ok(true) => {
+            info!(?path, "ssh: authenticated via keyfile");
+            Ok(true)
+        }
+        Ok(false) => {
+            warn!(?path, "ssh: keyfile rejected by server");
+            Ok(false)
+        }
+        Err(e) => {
+            warn!(?path, error = %e, "ssh: keyfile auth error");
+            Ok(false)
+        }
     }
 }
