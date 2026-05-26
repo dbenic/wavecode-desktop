@@ -10,10 +10,12 @@
 //
 
 import SwiftUI
+import AppKit
 
 @main
 struct WaveCodeDesktopApp: App {
     @State private var appState = AppState()
+    @NSApplicationDelegateAdaptor(WaveCodeAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         // Main control window — sidebar + multi-pane workspace
@@ -49,5 +51,28 @@ struct WaveCodeDesktopApp: App {
             SettingsView()
                 .environment(appState)
         }
+    }
+}
+
+/// When the app runs via `swift run` (i.e. as a raw executable rather
+/// than a packaged .app bundle), macOS doesn't auto-activate it — so no
+/// window appears even though the SwiftUI scene is mounted. We fix that
+/// by explicitly setting `.regular` activation policy and forcing focus
+/// on launch. This is a no-op for proper .app launches but harmless.
+final class WaveCodeAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Ensure at least one window is visible. With WindowGroup the
+        // OS should restore the last window automatically, but on first
+        // launch this guarantees the user sees something.
+        if NSApp.windows.first(where: { $0.isVisible && !$0.title.isEmpty }) == nil {
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
     }
 }
