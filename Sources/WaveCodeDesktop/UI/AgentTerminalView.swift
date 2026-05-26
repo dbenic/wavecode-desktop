@@ -47,7 +47,9 @@ struct AgentTerminalView: View {
             Divider()
 
             TerminalHost(tmuxSession: agent.tmuxSession)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -81,6 +83,10 @@ struct TerminalHost: NSViewRepresentable {
         view.configureNativeColors()
         view.allowMouseReporting = true
         view.terminalDelegate = context.coordinator
+        // Ensure the NSView grows with its container so SwiftTerm reports
+        // accurate cols/rows for the layout we actually have on screen.
+        view.autoresizingMask = [.width, .height]
+        view.translatesAutoresizingMaskIntoConstraints = true
         context.coordinator.attach(to: view)
         return view
     }
@@ -138,8 +144,10 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
 
     private func startSession() {
         let tmuxSession = self.tmuxSession
+        let cols = max(20, terminalView?.getTerminal().cols ?? 120)
+        let rows = max(5, terminalView?.getTerminal().rows ?? 30)
 
-        // The command does three things:
+        // The command does four things:
         //
         //  1. `TERM=xterm-256color` — Citadel's PTY request sends an
         //     empty (or "dumb") TERM by default; tmux can't find a
@@ -148,7 +156,12 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         //     near-universal default and matches SwiftTerm's own
         //     emulation.
         //
-        //  2. `script -qc 'X' /dev/null` — wraps tmux in a freshly
+        //  2. `stty cols X rows Y` — runs *inside* the script subshell
+        //     so the new openpty PTY adopts our actual SwiftTerm view
+        //     dimensions. Without this, tmux renders at the default
+        //     80x24 even though the view is much wider.
+        //
+        //  3. `script -qc '...' /dev/null` — wraps tmux in a freshly
         //     allocated PTY via openpty(3), with proper
         //     controlling-terminal semantics. Bash works without a
         //     /dev/tty; tmux specifically opens /dev/tty and would
@@ -156,11 +169,12 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         //     SSH-channel PTY isn't assigned as the controlling
         //     terminal of child processes.
         //
-        //  3. `|| true` — defensive. If `script` is somehow missing
+        //  4. `|| true` — defensive. If `script` is somehow missing
         //     (it's part of util-linux on every modern Linux), we
         //     still keep the SSH channel alive so the user sees the
         //     error and can debug from a shell.
-        let command = "TERM=xterm-256color script -qc 'tmux attach -t \(tmuxSession)' /dev/null || true"
+        let inner = "stty cols \(cols) rows \(rows); tmux attach -t \(tmuxSession)"
+        let command = "TERM=xterm-256color script -qc '\(inner)' /dev/null || true"
 
         Task { @MainActor in
             self.terminalView?.feed(text: "\u{001B}[90m[attaching to tmux session: \(tmuxSession)]\u{001B}[0m\r\n")
@@ -203,9 +217,21 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     }
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        // TODO(week-2): wire to PTY window_change via Citadel — current
-        // withTTY API doesn't expose resize cleanly; revisit when
-        // refactoring to lower-level channel access.
+        // SwiftTerm tells us the user resized the window. We can't send
+        // a real SSH window_change message through Citadel's withTTY
+        // (it doesn't expose the channel), so the workaround is to
+        // shell out: tell the remote shell to re-stty its tty, then
+        // kick tmux to redraw via SIGWINCH on the script process.
+        //
+        // This isn't perfect — typed characters get this command
+        // interleaved into wherever tmux's input is at — but for the
+        // moment between agent attaches and major resizes it's the
+        // pragmatic stopgap. A NIOSSH-direct PTY refactor will replace
+        // this with proper window_change events.
+        guard let session = session else { return }
+        let cmd = "\u{0003}stty cols \(newCols) rows \(newRows); tmux refresh-client -S 2>/dev/null\n"
+        let bytes = Array(cmd.utf8)
+        session.send(ArraySlice(bytes))
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {
