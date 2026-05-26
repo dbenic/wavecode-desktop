@@ -16,19 +16,44 @@ struct Sidebar: View {
 
         List(selection: $appState.activeAgentId) {
             Section {
-                ForEach(appState.agents) { agent in
-                    AgentRow(agent: agent)
-                        .tag(agent.id as String?)
-                        .contextMenu {
-                            Button("Open in new window") {
-                                // TODO: openWindow(id: "agent", value: agent.id)
+                if appState.agents.isEmpty {
+                    if appState.connectionStatus == .connected {
+                        Text("No agents on this server.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.vertical, 4)
+                    }
+                } else {
+                    ForEach(appState.agents) { agent in
+                        AgentRow(agent: agent)
+                            .tag(agent.id as String?)
+                            .contextMenu {
+                                Button("Open in new window") {
+                                    // TODO: openWindow(id: "agent", value: agent.id)
+                                }
                             }
-                        }
+                    }
                 }
             } header: {
-                Text("Agents (\(appState.agents.count))")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Agents (\(appState.agents.count))")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        Task { await ConnectionManager.shared.refreshAgents(into: appState) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Refresh agent list")
+                    .disabled(appState.connectionStatus != .connected)
+                }
             }
 
             Section("Artifacts") {

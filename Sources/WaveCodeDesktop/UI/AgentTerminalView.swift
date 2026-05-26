@@ -119,6 +119,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         self.terminalView = view
         session?.close()
         session = nil
+        clearTerminal()
         startSession()
     }
 
@@ -128,14 +129,28 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         terminalView = nil
     }
 
+    /// Wipe SwiftTerm's screen + scrollback so the new session starts on a
+    /// clean view. ESC[2J = clear visible; ESC[3J = clear scrollback;
+    /// ESC[H = home cursor.
+    private func clearTerminal() {
+        terminalView?.feed(text: "\u{001B}[2J\u{001B}[3J\u{001B}[H")
+    }
+
     private func startSession() {
         let tmuxSession = self.tmuxSession
-        let command = "tmux attach -t \(tmuxSession)"
 
-        // We're not @MainActor; hop to it via Task. SwiftTerm's feed is
-        // safe off main but we keep all UI work on main to be safe.
+        // Two improvements over a naked `tmux attach -t X`:
+        //  - `exec` replaces the shell with tmux so tmux is process 1
+        //    of the SSH channel — fewer indirections, cleaner exit
+        //  - `|| exec bash -l` is a fallback: if tmux can't attach
+        //    (session missing, "not a terminal" issue, etc.), we don't
+        //    leave the user with a dead session — they drop into a
+        //    login shell where they can debug (run `tty`, `tmux ls`,
+        //    re-attach manually, etc.)
+        let command = "exec tmux attach -t \(tmuxSession) 2>&1 || exec bash -l"
+
         Task { @MainActor in
-            self.terminalView?.feed(text: "\r\n\u{001B}[1;90m[attaching to tmux session: \(tmuxSession)]\u{001B}[0m\r\n")
+            self.terminalView?.feed(text: "\u{001B}[90m[attaching to tmux session: \(tmuxSession)]\u{001B}[0m\r\n")
 
             do {
                 let manager = ConnectionManager.shared

@@ -17,10 +17,13 @@ final class ConnectionManager {
     static let shared = ConnectionManager()
 
     private let log = Logger(subsystem: "com.wavenetic.wavecode-desktop", category: "ssh")
+    private let api = WaveCodeAPI()
 
     /// Citadel's SSHClient is a `final class` that performs its own
     /// internal NIO-based locking — thread-safe in practice.
     private var client: SSHClient?
+    private var activePort: Int = 3777
+    private var agentRefreshTask: Task<Void, Never>?
 
     private init() {}
 
@@ -61,14 +64,12 @@ final class ConnectionManager {
                 throw SSHAuthError.serverRejected(loaded: loaded, underlying: error)
             }
             self.client = newClient
+            self.activePort = profile.wavecodePort
             appState.connectionStatus = .connected
             log.info("ssh: connected as \(username, privacy: .public)")
 
-            // Load sample agents so the sidebar has content until week 2
-            // wires the live `/api/agents` fetch over the port-forward.
-            if appState.agents.isEmpty {
-                appState.agents = SampleData.agents
-            }
+            // Fetch the real agent list from the server.
+            await refreshAgents(into: appState)
         } catch {
             self.client = nil
             appState.connectionStatus = .error
@@ -79,12 +80,31 @@ final class ConnectionManager {
     }
 
     func disconnect(_ appState: AppState) async {
+        agentRefreshTask?.cancel()
+        agentRefreshTask = nil
         if let client {
             try? await client.close()
         }
         client = nil
         appState.connectionStatus = .disconnected
         log.info("ssh: disconnected")
+    }
+
+    /// One-shot fetch of `/api/agents`. Pushes the result into AppState.
+    /// Surfaces a connectionError on failure but leaves the connection
+    /// itself intact — fetch problems shouldn't kick the user out.
+    func refreshAgents(into appState: AppState) async {
+        guard let client else { return }
+        do {
+            let agents = try await api.fetchAgents(via: client, wavecodePort: activePort)
+            appState.agents = agents
+            log.info("api: loaded \(agents.count, privacy: .public) agents")
+        } catch {
+            let msg = (error as? LocalizedError)?.errorDescription
+                ?? String(describing: error)
+            appState.connectionError = msg
+            log.error("api: agent fetch failed: \(msg, privacy: .public)")
+        }
     }
 
     /// Open a TTY session running `command` (typically `tmux attach -t …`)
@@ -115,13 +135,3 @@ final class ConnectionManager {
     }
 }
 
-/// Hardcoded sample agents until week 2 wires the live feed.
-enum SampleData {
-    static let agents: [Agent] = [
-        Agent(id: "sample-1", name: "cl-backend", runtime: "claude-code", tmuxSession: "cl-backend", workspace: nil, mode: .spawned, status: .working, createdAt: ""),
-        Agent(id: "sample-2", name: "cl-api", runtime: "claude-code", tmuxSession: "cl-api", workspace: nil, mode: .spawned, status: .working, createdAt: ""),
-        Agent(id: "sample-3", name: "cl-wavebid", runtime: "claude-code", tmuxSession: "cl-wavebid", workspace: nil, mode: .adopted, status: .idle, createdAt: ""),
-        Agent(id: "sample-4", name: "cl-wavestorm", runtime: "claude-code", tmuxSession: "cl-wavestorm", workspace: nil, mode: .adopted, status: .idle, createdAt: ""),
-        Agent(id: "sample-5", name: "wavepulse", runtime: "claude-code", tmuxSession: "wavepulse", workspace: nil, mode: .adopted, status: .idle, createdAt: ""),
-    ]
-}
