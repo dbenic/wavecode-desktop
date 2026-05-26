@@ -111,6 +111,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     var tmuxSession: String
     private weak var terminalView: TerminalView?
     private var session: TerminalSession?
+    private var wheelMonitor: Any?
 
     init(tmuxSession: String) {
         self.tmuxSession = tmuxSession
@@ -118,11 +119,15 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
 
     func attach(to view: TerminalView) {
         self.terminalView = view
+        installWheelForwarder(on: view)
         startSession()
     }
 
     func reattach(to view: TerminalView) {
+        WheelForwarder.uninstall(wheelMonitor)
+        wheelMonitor = nil
         self.terminalView = view
+        installWheelForwarder(on: view)
         session?.close()
         session = nil
         clearTerminal()
@@ -130,9 +135,15 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     }
 
     func detach() {
+        WheelForwarder.uninstall(wheelMonitor)
+        wheelMonitor = nil
         session?.close()
         session = nil
         terminalView = nil
+    }
+
+    private func installWheelForwarder(on view: TerminalView) {
+        wheelMonitor = WheelForwarder.install(on: view)
     }
 
     /// Wipe SwiftTerm's screen + scrollback so the new session starts on a
@@ -173,7 +184,13 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         //     (it's part of util-linux on every modern Linux), we
         //     still keep the SSH channel alive so the user sees the
         //     error and can debug from a shell.
-        let inner = "stty cols \(cols) rows \(rows); tmux attach -t \(tmuxSession)"
+        // `tmux set -g mouse on` enables mouse-driven scrollback via
+        // tmux's copy mode. With this on (and our WaveTerminalView
+        // forwarding wheel events to mouse mode), the scroll wheel
+        // "just works" for navigating tmux history. The 2>/dev/null
+        // swallows the harmless "no server running" error if this is
+        // the first command before tmux server starts.
+        let inner = "stty cols \(cols) rows \(rows); tmux set -g mouse on 2>/dev/null; tmux attach -t \(tmuxSession)"
         let command = "TERM=xterm-256color script -qc '\(inner)' /dev/null || true"
 
         Task { @MainActor in
