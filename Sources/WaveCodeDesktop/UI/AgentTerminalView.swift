@@ -139,15 +139,27 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private func startSession() {
         let tmuxSession = self.tmuxSession
 
-        // Two improvements over a naked `tmux attach -t X`:
-        //  - `exec` replaces the shell with tmux so tmux is process 1
-        //    of the SSH channel — fewer indirections, cleaner exit
-        //  - `|| exec bash -l` is a fallback: if tmux can't attach
-        //    (session missing, "not a terminal" issue, etc.), we don't
-        //    leave the user with a dead session — they drop into a
-        //    login shell where they can debug (run `tty`, `tmux ls`,
-        //    re-attach manually, etc.)
-        let command = "exec tmux attach -t \(tmuxSession) 2>&1 || exec bash -l"
+        // Why the `script` wrapper:
+        //
+        // Citadel's withTTY allocates a PTY for the SSH channel, but
+        // that PTY isn't assigned as the controlling terminal of child
+        // processes. Bash works fine without `/dev/tty`; tmux doesn't —
+        // it tries to open `/dev/tty` and gets "not a terminal".
+        //
+        // `script -qc 'X' /dev/null` runs X inside a freshly-allocated
+        // PTY (via openpty(3)), with proper controlling-terminal
+        // semantics. tmux running inside `script` gets its own working
+        // /dev/tty and renders correctly.
+        //
+        // When tmux exits (user detaches with ctrl-b d, or session
+        // ends), `script` exits, and our parent shell prompt remains —
+        // so the SSH channel stays open and the user can reattach or
+        // run other commands.
+        //
+        // The `|| true` keeps the shell alive even if `script` itself
+        // isn't installed (rare on Ubuntu/Debian — it's part of
+        // bsdutils — but defensive).
+        let command = "script -qc 'tmux attach -t \(tmuxSession)' /dev/null || true"
 
         Task { @MainActor in
             self.terminalView?.feed(text: "\u{001B}[90m[attaching to tmux session: \(tmuxSession)]\u{001B}[0m\r\n")
