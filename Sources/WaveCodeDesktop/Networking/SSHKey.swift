@@ -13,7 +13,12 @@
 //
 
 import Foundation
-import Citadel
+// @preconcurrency silences the Sendable warning on Citadel's
+// SSHAuthenticationMethod — it's a final class without Sendable
+// conformance, but it's effectively safe to pass across actor
+// boundaries because Citadel performs internal locking. Revisit when
+// upstream adopts Sendable annotations.
+@preconcurrency import Citadel
 import Crypto
 
 enum SSHKeyType: String, Sendable {

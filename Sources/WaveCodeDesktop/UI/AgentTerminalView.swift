@@ -139,27 +139,28 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private func startSession() {
         let tmuxSession = self.tmuxSession
 
-        // Why the `script` wrapper:
+        // The command does three things:
         //
-        // Citadel's withTTY allocates a PTY for the SSH channel, but
-        // that PTY isn't assigned as the controlling terminal of child
-        // processes. Bash works fine without `/dev/tty`; tmux doesn't —
-        // it tries to open `/dev/tty` and gets "not a terminal".
+        //  1. `TERM=xterm-256color` — Citadel's PTY request sends an
+        //     empty (or "dumb") TERM by default; tmux can't find a
+        //     terminfo entry for that, hence
+        //     "terminal does not support clear". xterm-256color is the
+        //     near-universal default and matches SwiftTerm's own
+        //     emulation.
         //
-        // `script -qc 'X' /dev/null` runs X inside a freshly-allocated
-        // PTY (via openpty(3)), with proper controlling-terminal
-        // semantics. tmux running inside `script` gets its own working
-        // /dev/tty and renders correctly.
+        //  2. `script -qc 'X' /dev/null` — wraps tmux in a freshly
+        //     allocated PTY via openpty(3), with proper
+        //     controlling-terminal semantics. Bash works without a
+        //     /dev/tty; tmux specifically opens /dev/tty and would
+        //     otherwise fail with "not a terminal" because Citadel's
+        //     SSH-channel PTY isn't assigned as the controlling
+        //     terminal of child processes.
         //
-        // When tmux exits (user detaches with ctrl-b d, or session
-        // ends), `script` exits, and our parent shell prompt remains —
-        // so the SSH channel stays open and the user can reattach or
-        // run other commands.
-        //
-        // The `|| true` keeps the shell alive even if `script` itself
-        // isn't installed (rare on Ubuntu/Debian — it's part of
-        // bsdutils — but defensive).
-        let command = "script -qc 'tmux attach -t \(tmuxSession)' /dev/null || true"
+        //  3. `|| true` — defensive. If `script` is somehow missing
+        //     (it's part of util-linux on every modern Linux), we
+        //     still keep the SSH channel alive so the user sees the
+        //     error and can debug from a shell.
+        let command = "TERM=xterm-256color script -qc 'tmux attach -t \(tmuxSession)' /dev/null || true"
 
         Task { @MainActor in
             self.terminalView?.feed(text: "\u{001B}[90m[attaching to tmux session: \(tmuxSession)]\u{001B}[0m\r\n")
