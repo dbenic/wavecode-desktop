@@ -39,15 +39,27 @@ final class ConnectionManager {
         let username = profile.sshUser ?? NSUserName()
 
         do {
-            let auth = try SSHKey.loadAuthMethod(username: username)
-            let newClient = try await SSHClient.connect(
-                host: profile.sshHost,
-                port: profile.sshPort,
-                authenticationMethod: auth,
-                // TOFU. TODO(week-5): parse ~/.ssh/known_hosts and prompt on mismatch.
-                hostKeyValidator: .acceptAnything(),
-                reconnect: .never
+            let loaded = try SSHKey.loadAuthMethod(
+                username: username,
+                explicitIdentityFile: profile.identityFile
             )
+            log.info("ssh: trying \(loaded.keyType.rawValue, privacy: .public) key at \(loaded.keyPath, privacy: .public)")
+
+            let newClient: SSHClient
+            do {
+                newClient = try await SSHClient.connect(
+                    host: profile.sshHost,
+                    port: profile.sshPort,
+                    authenticationMethod: loaded.method,
+                    // TOFU. TODO(week-5): parse ~/.ssh/known_hosts and prompt on mismatch.
+                    hostKeyValidator: .acceptAnything(),
+                    reconnect: .never
+                )
+            } catch {
+                // Wrap Citadel's "allAuthenticationOptionsFailed" (or any
+                // auth-time error) with our key context + suggested fix.
+                throw SSHAuthError.serverRejected(loaded: loaded, underlying: error)
+            }
             self.client = newClient
             appState.connectionStatus = .connected
             log.info("ssh: connected as \(username, privacy: .public)")

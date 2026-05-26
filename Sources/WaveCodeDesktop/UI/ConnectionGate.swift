@@ -25,7 +25,7 @@ struct ConnectionGate: View {
 
             Text("Connect to ")
                 .foregroundStyle(.secondary)
-            + Text(appState.profile.sshHost)
+            + Text(appState.activeProfile.sshHost)
                 .font(.system(.title3, design: .monospaced))
                 .foregroundStyle(.green)
 
@@ -77,7 +77,7 @@ struct ConnectionGate: View {
 
     private func connect() {
         Task {
-            await ConnectionManager.shared.connect(profile: appState.profile, into: appState)
+            await ConnectionManager.shared.connect(profile: appState.activeProfile, into: appState)
         }
     }
 }

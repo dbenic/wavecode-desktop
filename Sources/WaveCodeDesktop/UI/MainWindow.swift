@@ -21,8 +21,11 @@ struct MainWindow: View {
             WorkspacePane()
         }
         .navigationTitle("WaveCode")
-        .navigationSubtitle(appState.profile.label)
+        .navigationSubtitle(appState.activeProfile.label)
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                ServerPicker()
+            }
             ToolbarItem(placement: .principal) {
                 ConnectionStatusPill()
             }
@@ -33,9 +36,62 @@ struct MainWindow: View {
                 .help("Command palette (⌘K)")
             }
         }
-        .task {
-            await ConnectionManager.shared.connect(profile: appState.profile, into: appState)
+        .task(id: appState.activeProfile.id) {
+            // Reconnect whenever the active profile changes.
+            await ConnectionManager.shared.connect(profile: appState.activeProfile, into: appState)
         }
+    }
+}
+
+/// Toolbar dropdown for switching the active server profile. Shows the
+/// current profile's label + a chevron; menu lists all profiles.
+struct ServerPicker: View {
+    @Environment(AppState.self) private var appState
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Menu {
+            ForEach(appState.profiles) { profile in
+                Button {
+                    Task { await switchTo(profile.id) }
+                } label: {
+                    HStack {
+                        if profile.id == appState.activeProfileId {
+                            Image(systemName: "checkmark")
+                        }
+                        Text(profile.label)
+                        Spacer()
+                        Text(profile.sshHost)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Divider()
+
+            Button("Manage servers…") {
+                openSettings()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "server.rack")
+                    .foregroundStyle(.secondary)
+                Text(appState.activeProfile.label)
+                    .lineLimit(1)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    private func switchTo(_ id: UUID) async {
+        guard id != appState.activeProfileId else { return }
+        // Tear down the current connection before switching.
+        await ConnectionManager.shared.disconnect(appState)
+        appState.agents = []
+        appState.activeAgentId = nil
+        appState.setActive(id: id)
+        // .task(id:) in MainWindow will fire the new connect.
     }
 }
 

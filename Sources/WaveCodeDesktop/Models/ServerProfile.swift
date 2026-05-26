@@ -27,6 +27,18 @@ struct ServerProfile: Codable, Identifiable, Hashable, Sendable {
         sshPort: 22,
         wavecodePort: 3777
     )
+
+    /// Build a blank profile for the "+ Add" action — distinct UUID,
+    /// generic label/host so the user fills it in.
+    static func newDraft() -> ServerProfile {
+        ServerProfile(
+            label: "New server",
+            sshHost: "",
+            sshUser: nil,
+            sshPort: 22,
+            wavecodePort: 3777
+        )
+    }
 }
 
 enum ConnectionStatus: String, Sendable {
