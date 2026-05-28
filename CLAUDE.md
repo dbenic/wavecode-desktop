@@ -72,45 +72,62 @@ Tests for any new code path that touches an SSH channel:
 
 If you can't pass that test, the code path is wrong.
 
-### 2b. WHY `channel.close()` empirically kills sessions
-       (the open mystery + why our hotfix holds anyway)
+### 2b. The "channel.close kills sessions" mystery — investigated
 
-We never fully root-caused why calling NIOSSH `channel.close()` on a
-PTY child that's running `exec tmux attach -t X` causes the underlying
-tmux session to terminate (not just detach the client), while a normal
-`ssh -t user@host tmux attach -t X` followed by Ctrl-D detaches cleanly.
+The hotfix history records that calling NIOSSH `channel.close()` on a
+PTY child running `exec tmux attach -t X` appeared to terminate the
+underlying tmux session (not just detach the client). Three real
+sessions were destroyed during testing (`co-edge`, `co-backend`,
+`cl-opsdev`).
 
-Working theory (unverified):
-  - NIOSSH's `channel.close()` (mode `.all`) emits SSH_MSG_CHANNEL_CLOSE
-    immediately, without flushing pending stdin or sending EOF first.
-  - sshd reacts by reaping the child process group with SIGHUP, but
-    the timing relative to tmux's SIGHUP handler may race with tmux's
-    own state machine — particularly with our PTY allocated via NIOSSH
-    rather than via openssh's pty.c (which sets up a slightly different
-    job-control posture).
-  - Result: tmux exits before its SIGHUP handler's "detach client
-    cleanly, leave server alone" path runs to completion, which
-    cascades to session teardown in some tmux configurations.
+**Investigation results** (May 2026, via `InvestigatePTYClose` probe):
 
-This is unproven; a small NIOSSH reproducer outside the app would
-be needed to confirm. Filed for a future deep-dive.
+Reproduction attempted against a canary `wctest-canary` session
+running `sleep 3600`. Three close patterns tested:
 
-Why the hotfix holds without a root-cause fix:
-  1. `PTYSession.close()` sends Ctrl-b d before closing the SSH
-     channel, so tmux exits via its own clean detach path (the user's
-     own `Ctrl-b d` keystroke) BEFORE the close cascade runs.
-  2. The per-agent session registry in WorkspacePane means we never
-     close PTY children during normal use — only the parent SSH
-     connection closes (on profile switch / disconnect), and the
-     parent close cascades server-side via the standard sshd TCP-drop
-     path, which has always been safe for tmux.
+| Pattern | Result at t+0 | Result at t+30s |
+|---|---|---|
+| `channel.close()` with no prelude | survived | survived |
+| Ctrl-b d, 250ms, `channel.close()` | survived | survived |
+| Just Ctrl-b d, wait for natural exit | survived | survived |
 
-If you DO decide to investigate the root cause: build a minimal NIOSSH
-script that opens a connection, opens a PTY channel, exec's
-`tmux attach -t TESTSESSION`, then calls `channel.close()`. Compare
-`tmux ls` before and after. If sessions die, vary close mode
-(.output only), terminal modes, and whether you send a windowChange
-before close. Report findings as a PR upstream or document them here.
+Wave's tmux global config:
+  - `destroy-unattached off` (default — sessions persist with no clients)
+  - No `~/.tmux.conf`
+
+Conclusion: **on a simple session, bare `channel.close()` does NOT
+kill anything**. The original kill must have been caused by something
+specific to the user's real agent sessions:
+  - Claude Code / Codex CLI / Aider may handle SIGHUP unusually
+    (e.g. catching it as "user disconnected" and gracefully shutting
+    down, which would close their tmux pane, which would end the
+    session if there were no other windows)
+  - Or the sessions died from an unrelated cause around the same time
+
+The InvestigatePTYClose target is preserved in-tree for future
+investigation. To re-run:
+  swift run InvestigatePTYClose <host> <user> [bare_close|ctrlbd_close|just_ctrlbd|all]
+
+Next steps if it ever recurs:
+  1. Create a canary session running a **real Claude Code** or
+     equivalent agent (not just `sleep`) and re-run the probe.
+  2. Watch the agent's own log/output for SIGHUP-triggered shutdown
+     behaviour.
+  3. Test with `signal()`-trapping shell wrappers to see at what
+     level the SIGHUP cascade happens.
+
+**Defence-in-depth invariants still apply** (per §2a). Even though the
+empirical evidence suggests channel.close is safe for normal sessions,
+the cost of our defensive measures is small:
+  - Per-agent session registry → no closes on agent switch (and the
+    UX win of instant switching is valuable on its own merits)
+  - `PTYSession.close()` sends Ctrl-b d first → tmux detaches via its
+    own clean path; channel close then has nothing to SIGHUP
+  - `NIOSSHPTYClient.disconnect()` closes parent only → server cleans
+    up via standard sshd TCP-drop path
+
+If you ever need to bypass for testing, `PTYSession.bareClose()` is
+exposed but marked "never call from the app — probe only".
 
 ### 3. Tmux is the work surface, not a rendered abstraction.
 

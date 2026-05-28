@@ -23,6 +23,8 @@ let package = Package(
     ],
     products: [
         .executable(name: "WaveCodeDesktop", targets: ["WaveCodeDesktop"]),
+        // Investigative probe — not shipped with the app.
+        .executable(name: "InvestigatePTYClose", targets: ["InvestigatePTYClose"]),
     ],
     dependencies: [
         // Pure-Swift SSH client — async/await native, modern, MIT.
@@ -43,6 +45,10 @@ let package = Package(
         // one version of the package. When Citadel upgrades, we follow.
         // https://github.com/wellz26/swift-nio-ssh
         .package(url: "https://github.com/wellz26/swift-nio-ssh.git", from: "0.3.4"),
+        // swift-nio is transitive via swift-nio-ssh but declared
+        // explicitly so the InvestigatePTYClose probe can import
+        // NIOPosix for ClientBootstrap.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.42.0"),
 
         // Native macOS terminal renderer using CoreText. Apache 2.0.
         // https://github.com/migueldeicaza/SwiftTerm
@@ -68,6 +74,20 @@ let package = Package(
             name: "WaveCodeDesktopTests",
             dependencies: ["WaveCodeDesktop"],
             path: "Tests/WaveCodeDesktopTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // Standalone investigative probe for the channel-close-kills-tmux
+        // mystery (CLAUDE.md §2b). Run with:
+        //   swift run InvestigatePTYClose <host> <user> [test]
+        .executableTarget(
+            name: "InvestigatePTYClose",
+            dependencies: [
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                // For the OpenSSH Ed25519 key parser
+                .product(name: "Citadel", package: "Citadel"),
+            ],
+            path: "Sources/InvestigatePTYClose",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

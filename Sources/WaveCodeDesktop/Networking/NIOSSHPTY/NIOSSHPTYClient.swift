@@ -22,17 +22,19 @@ import Crypto
 import OSLog
 
 @MainActor
-final class NIOSSHPTYClient {
+public final class NIOSSHPTYClient {
+    public init() {}
+
     private let log = Logger(subsystem: "com.wavenetic.wavecode-desktop", category: "niossh")
 
     nonisolated(unsafe) private var group: MultiThreadedEventLoopGroup?
     nonisolated(unsafe) private var connection: Channel?
 
-    var isConnected: Bool { connection != nil }
+    public var isConnected: Bool { connection != nil }
 
     // MARK: - Connect / disconnect
 
-    func connect(
+    public func connect(
         host: String,
         port: Int,
         username: String,
@@ -86,7 +88,7 @@ final class NIOSSHPTYClient {
         }
     }
 
-    func disconnect() async {
+    public func disconnect() async {
         // IMPORTANT: do NOT close child PTY channels here. Closing them
         // via NIOSSH was killing the user's tmux sessions on the server.
         // Instead we just close the parent SSH connection; the server's
@@ -114,7 +116,7 @@ final class NIOSSHPTYClient {
     /// Open a child session channel, request a PTY with the given size,
     /// then request a shell (or exec the given command). Returns a
     /// `PTYSession` for sending input, resizing, and reading output.
-    func openShellPTY(
+    public func openShellPTY(
         cols: Int,
         rows: Int,
         term: String = "xterm-256color",
@@ -168,8 +170,8 @@ final class NIOSSHPTYClient {
 /// One live PTY session. Holds the NIO child channel and exposes
 /// Swift-concurrency-friendly send / resize / close + an inbound
 /// byte stream.
-final class PTYSession: @unchecked Sendable {
-    let inbound: AsyncStream<ByteBuffer>
+public final class PTYSession: @unchecked Sendable {
+    public let inbound: AsyncStream<ByteBuffer>
     private let channel: Channel
     private let exitFuture: EventLoopFuture<Int32?>
 
@@ -185,7 +187,7 @@ final class PTYSession: @unchecked Sendable {
 
     /// Send bytes to the remote PTY's stdin.
     /// `Channel.writeAndFlush` is thread-safe — NIO dispatches internally.
-    func send(_ bytes: ArraySlice<UInt8>) async {
+    public func send(_ bytes: ArraySlice<UInt8>) async {
         var buf = channel.allocator.buffer(capacity: bytes.count)
         buf.writeBytes(bytes)
         try? await channel.writeAndFlush(buf).get()
@@ -194,7 +196,7 @@ final class PTYSession: @unchecked Sendable {
     /// Send an SSH `window_change` message — the kernel-level resize
     /// signal that `stty cols/rows` was always a hack around.
     /// `triggerUserOutboundEvent` requires the channel's event loop.
-    func resize(cols: Int, rows: Int) async {
+    public func resize(cols: Int, rows: Int) async {
         let evt = SSHChannelRequestEvent.WindowChangeRequest(
             terminalCharacterWidth: cols,
             terminalRowHeight: rows,
@@ -217,11 +219,20 @@ final class PTYSession: @unchecked Sendable {
     /// entirely: tmux client exits cleanly, session lives on the
     /// server, and our channel close is then closing an already-empty
     /// process slot — nothing to SIGHUP.
-    func close() async {
+    public func close() async {
         // ^B (0x02) then 'd' (0x64) = tmux default detach binding
         await send(ArraySlice([0x02, 0x64]))
         // Give tmux ~250 ms to receive + process the keystroke
         try? await Task.sleep(nanoseconds: 250_000_000)
+        try? await channel.close().get()
+    }
+
+    /// For the investigative probe (CLAUDE.md §2b): close the SSH
+    /// channel directly without sending Ctrl-b d first. This is the
+    /// pattern that historically killed tmux sessions; exposed here
+    /// so the InvestigatePTYClose probe can A/B against `close()`.
+    /// Never call this from the app — only from the probe.
+    public func bareClose() async {
         try? await channel.close().get()
     }
 
