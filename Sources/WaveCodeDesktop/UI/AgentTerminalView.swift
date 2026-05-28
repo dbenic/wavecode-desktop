@@ -74,8 +74,14 @@ struct AgentTerminalWindow: View {
 }
 
 /// SwiftUI wrapper around SwiftTerm's NSView. SwiftTerm is AppKit-based;
-/// we bridge via NSViewRepresentable. The PTY hook-up lives in
-/// TerminalCoordinator.
+/// we bridge via NSViewRepresentable.
+///
+/// We wrap SwiftTerm's TerminalView in a plain container NSView and
+/// pin it with Auto Layout constraints. Without this wrapper,
+/// SwiftTerm's TerminalView resolves to a tiny intrinsic content size
+/// inside SwiftUI's NSViewRepresentable and refuses to fill the
+/// proposed frame — leaving the terminal as a one-line strip at the
+/// top of the workspace.
 struct TerminalHost: NSViewRepresentable {
     let tmuxSession: String
     @Environment(AppState.self) private var appState
@@ -84,36 +90,60 @@ struct TerminalHost: NSViewRepresentable {
         TerminalCoordinator(tmuxSession: tmuxSession, appState: appState)
     }
 
-    func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView()
-        view.configureNativeColors()
-        view.allowMouseReporting = true
-        view.font = appState.terminalPrefs.makeFont()
-        view.terminalDelegate = context.coordinator
-        // Ensure the NSView grows with its container so SwiftTerm reports
-        // accurate cols/rows for the layout we actually have on screen.
-        view.autoresizingMask = [.width, .height]
-        view.translatesAutoresizingMaskIntoConstraints = true
-        context.coordinator.attach(to: view)
-        return view
+    func makeNSView(context: Context) -> NSView {
+        let container = TerminalHostContainer()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let term = TerminalView()
+        term.configureNativeColors()
+        term.allowMouseReporting = true
+        term.font = appState.terminalPrefs.makeFont()
+        term.terminalDelegate = context.coordinator
+        term.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(term)
+        container.terminalView = term
+
+        // Pin SwiftTerm to fill the container. Auto Layout (not
+        // autoresizingMask) because that's what SwiftUI's
+        // NSViewRepresentable expects underneath.
+        NSLayoutConstraint.activate([
+            term.topAnchor.constraint(equalTo: container.topAnchor),
+            term.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            term.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            term.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        context.coordinator.attach(to: term)
+        return container
     }
 
-    func updateNSView(_ nsView: TerminalView, context: Context) {
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let container = nsView as? TerminalHostContainer,
+              let term = container.terminalView else { return }
+
         // Live-update font when prefs change.
         let want = appState.terminalPrefs.makeFont()
-        if nsView.font.pointSize != want.pointSize ||
-           nsView.font.fontName != want.fontName {
-            nsView.font = want
+        if term.font.pointSize != want.pointSize ||
+           term.font.fontName != want.fontName {
+            term.font = want
         }
         if context.coordinator.tmuxSession != tmuxSession {
             context.coordinator.tmuxSession = tmuxSession
-            context.coordinator.reattach(to: nsView)
+            context.coordinator.reattach(to: term)
         }
     }
 
-    static func dismantleNSView(_ nsView: TerminalView, coordinator: TerminalCoordinator) {
+    static func dismantleNSView(_ nsView: NSView, coordinator: TerminalCoordinator) {
         coordinator.detach()
     }
+}
+
+/// Plain NSView container that holds the SwiftTerm TerminalView. The
+/// only reason we need a subclass is to keep a typed reference to the
+/// inner TerminalView so updateNSView and dismantleNSView can find it.
+private final class TerminalHostContainer: NSView {
+    weak var terminalView: TerminalView?
 }
 
 /// Bridges SwiftTerm's TerminalView with a TerminalSession (SSH PTY).
