@@ -43,6 +43,9 @@ final class AppState {
             if let id = activeAgentId {
                 visitedAgentIds.insert(id)
             }
+            // Persist scoped to the current profile so relaunch puts
+            // the user back where they were on this server.
+            ProfileStorage.saveLastActiveAgent(activeAgentId, forProfile: activeProfile.id)
         }
     }
     var paletteOpen: Bool = false

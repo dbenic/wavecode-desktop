@@ -16,6 +16,31 @@ enum ProfileStorage {
     private static let log = Logger(subsystem: "com.wavenetic.wavecode-desktop", category: "profiles")
     private static let profilesKey = "wavecode.profiles.v1"
     private static let activeKey = "wavecode.profiles.active.v1"
+    private static let lastAgentKey = "wavecode.lastActiveAgent.v1"
+
+    /// The agent id last shown in the workspace, scoped per server
+    /// profile. Stored as `<profileId>::<agentId>` so switching servers
+    /// doesn't surface a dead agent. Returns nil if no record exists for
+    /// this profile or if the stored format is unrecognised.
+    static func loadLastActiveAgent(forProfile profileId: UUID) -> String? {
+        guard let raw = UserDefaults.standard.string(forKey: lastAgentKey) else { return nil }
+        let parts = raw.split(separator: "::", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts[0] == profileId.uuidString,
+              !parts[1].isEmpty else {
+            return nil
+        }
+        return String(parts[1])
+    }
+
+    static func saveLastActiveAgent(_ agentId: String?, forProfile profileId: UUID) {
+        let key = lastAgentKey
+        if let agentId, !agentId.isEmpty {
+            UserDefaults.standard.set("\(profileId.uuidString)::\(agentId)", forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
 
     static func loadAll() -> (profiles: [ServerProfile], activeId: UUID?) {
         let defaults = UserDefaults.standard

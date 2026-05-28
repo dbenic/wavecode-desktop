@@ -111,25 +111,37 @@ struct WorkspacePane: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if appState.connectionStatus != .connected {
+        // Initial-connect splash only when we've never been connected.
+        // Once we've succeeded at least once, we keep the workspace
+        // visible and use ConnectionBanner to surface non-connected
+        // states (reconnecting / error) without hiding cached terminals.
+        if appState.connectionStatus != .connected && appState.visitedAgentIds.isEmpty {
             ConnectionGate()
         } else {
-            // ZStack keeps every visited agent's TerminalView alive in
-            // the view tree. Only the active one is opaque + hit-testable.
-            // SwiftUI preserves the underlying NSViews (so SwiftTerm
-            // state survives), which means our TerminalCoordinator's
-            // SSH channel + tmux client + session stay alive across
-            // agent switches. Instant switching, zero churn.
-            ZStack {
-                ForEach(appState.visitedAgents) { agent in
-                    AgentTerminalView(agent: agent)
-                        .opacity(appState.activeAgentId == agent.id ? 1 : 0)
-                        .allowsHitTesting(appState.activeAgentId == agent.id)
-                }
+            VStack(spacing: 0) {
+                ConnectionBanner()
+                workspaceContent
+            }
+        }
+    }
 
-                if appState.visitedAgents.isEmpty || appState.activeAgentId == nil {
-                    EmptyWorkspace()
-                }
+    @ViewBuilder
+    private var workspaceContent: some View {
+        // ZStack keeps every visited agent's TerminalView alive in
+        // the view tree. Only the active one is opaque + hit-testable.
+        // SwiftUI preserves the underlying NSViews (so SwiftTerm
+        // state survives), which means our TerminalCoordinator's
+        // SSH channel + tmux client + session stay alive across
+        // agent switches. Instant switching, zero churn.
+        ZStack {
+            ForEach(appState.visitedAgents) { agent in
+                AgentTerminalView(agent: agent)
+                    .opacity(appState.activeAgentId == agent.id ? 1 : 0)
+                    .allowsHitTesting(appState.activeAgentId == agent.id)
+            }
+
+            if appState.visitedAgents.isEmpty || appState.activeAgentId == nil {
+                EmptyWorkspace()
             }
         }
     }

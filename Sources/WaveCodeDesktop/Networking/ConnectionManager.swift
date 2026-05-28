@@ -136,6 +136,17 @@ final class ConnectionManager {
             let agents = try await api.fetchAgents(via: client, wavecodePort: activePort)
             appState.agents = agents
             log.info("api: loaded \(agents.count, privacy: .public) agents")
+
+            // First fetch after (re)connect: restore the user's last
+            // active agent if it still exists on this server. This is
+            // why we waited until agents are loaded — restoring earlier
+            // would point at an agent the UI doesn't yet know about.
+            if appState.activeAgentId == nil,
+               let lastId = ProfileStorage.loadLastActiveAgent(forProfile: appState.activeProfile.id),
+               agents.contains(where: { $0.id == lastId }) {
+                appState.activeAgentId = lastId
+                log.info("api: restored last active agent \(lastId, privacy: .public)")
+            }
         } catch {
             let msg = (error as? LocalizedError)?.errorDescription
                 ?? String(describing: error)
