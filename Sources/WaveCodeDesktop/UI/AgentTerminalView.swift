@@ -157,6 +157,17 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private var session: TerminalSession?
     private var wheelMonitor: Any?
 
+    // Latest size SwiftTerm has reported for our view. Tracked
+    // separately from the session because sizeChanged fires AS THE
+    // VIEW IS LAID OUT — which happens before our async startSession
+    // can finish creating the PTY. Without this we'd lose the
+    // post-layout size and the PTY would stay at the tiny initial
+    // 20×5 we passed at startSession time, even though the view is
+    // actually 200×50. We apply pendingSize as soon as `session`
+    // becomes non-nil and on every subsequent sizeChanged.
+    private var pendingCols: Int?
+    private var pendingRows: Int?
+
     // Coalesce inbound byte chunks within one display frame so heavy
     // output (build logs, big diffs) doesn't trigger one render per
     // tiny SSH chunk. Buffer-and-flush approach: bytes arrive on the
@@ -342,6 +353,25 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
                     }
                 )
                 self.session = session
+
+                // CRITICAL: if SwiftTerm has already reported a size
+                // (sizeChanged ran while we were awaiting openTerminalSession),
+                // apply it now. Otherwise the PTY stays at the tiny
+                // initial size we used above (20×5 or whatever fallback)
+                // and tmux renders into a sliver in the corner.
+                //
+                // Also fall back to the terminal's *current* cols/rows
+                // (in case sizeChanged never fired because the size
+                // matched the initial value, which can happen for
+                // rapidly-attached agents).
+                if let cols = self.pendingCols, let rows = self.pendingRows {
+                    session.resize(cols: cols, rows: rows)
+                    self.pendingCols = nil
+                    self.pendingRows = nil
+                } else if let term = self.terminalView?.getTerminal(),
+                          term.cols > 1, term.rows > 1 {
+                    session.resize(cols: term.cols, rows: term.rows)
+                }
             } catch {
                 self.terminalView?.feed(text: "\r\n\u{001B}[31m[failed to open session: \(error.localizedDescription)]\u{001B}[0m\r\n")
             }
@@ -410,7 +440,18 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         // Real SSH window_change message — the kernel signals SIGWINCH
         // to the remote process and tmux redraws cleanly. No stdin
         // interleaving, no artifacts, no `stty` hack.
-        session?.resize(cols: newCols, rows: newRows)
+        //
+        // If the session isn't open yet, stash the size. startSession
+        // applies pendingCols/Rows the moment it finishes — without
+        // this, the post-layout sizeChanged that fires after we kick
+        // off openTerminalSession would be lost and the PTY would
+        // remain at its tiny initial dimensions forever.
+        if let session = session {
+            session.resize(cols: newCols, rows: newRows)
+        } else {
+            pendingCols = newCols
+            pendingRows = newRows
+        }
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {
