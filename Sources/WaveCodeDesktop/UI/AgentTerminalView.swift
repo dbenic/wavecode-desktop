@@ -136,21 +136,35 @@ struct TerminalHost: NSViewRepresentable {
 }
 
 /// NSView container that holds the SwiftTerm TerminalView. We manage
-/// the inner view's frame manually here in `layout()` rather than via
-/// Auto Layout constraints. Reason: NSViewRepresentable + Auto Layout +
-/// SwiftTerm's internal sizing repeatedly produced a one-cell-tall
-/// terminal pinned to the corner. Manually setting the frame each
-/// layout cycle is deterministic — SwiftTerm's setFrameSize then
-/// processSizeChange fire synchronously, terminal.cols/rows update,
-/// and our sizeChanged delegate fires with real numbers.
+/// the inner view's frame manually here in `setFrameSize` (and
+/// `layout()` as belt-and-braces) rather than via Auto Layout
+/// constraints — Auto Layout + NSViewRepresentable + SwiftTerm's
+/// internal sizing has repeatedly produced one-cell-tall terminals
+/// pinned to the corner. Manually setting the frame each time the
+/// container is sized is deterministic: SwiftTerm's own setFrameSize
+/// then processSizeChange fire synchronously, terminal.cols/rows
+/// update, and our sizeChanged delegate fires with real numbers.
 private final class TerminalHostContainer: NSView {
     weak var terminalView: TerminalView?
 
-    /// Layout the inner SwiftTerm to fill our bounds. Triggers
-    /// SwiftTerm's setFrameSize → processSizeChange → sizeChanged
-    /// delegate path every time SwiftUI resizes us.
+    /// setFrameSize fires whenever the container's frame is set
+    /// (which SwiftUI's NSViewRepresentable does to size us to the
+    /// proposed frame). Sync the inner SwiftTerm immediately so its
+    /// own setFrameSize → processSizeChange → sizeChanged delegate
+    /// fires within the same layout pass.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        syncInnerFrame()
+    }
+
+    /// layout() is also called by AppKit during the layout pass —
+    /// secondary path in case setFrameSize hasn't kept up.
     override func layout() {
         super.layout()
+        syncInnerFrame()
+    }
+
+    private func syncInnerFrame() {
         guard let term = terminalView else { return }
         if term.frame != bounds {
             term.frame = bounds
@@ -158,7 +172,9 @@ private final class TerminalHostContainer: NSView {
     }
 
     /// No intrinsic size — let SwiftUI's proposed frame drive sizing.
-    override var intrinsicContentSize: NSSize { .init(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric) }
+    override var intrinsicContentSize: NSSize {
+        .init(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
 }
 
 /// Bridges SwiftTerm's TerminalView with a TerminalSession (SSH PTY).
@@ -369,27 +385,42 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
                 )
                 self.session = session
 
-                // CRITICAL: if SwiftTerm has already reported a size
-                // (sizeChanged ran while we were awaiting openTerminalSession),
-                // apply it now. Otherwise the PTY stays at the tiny
-                // initial size we used above (20×5 or whatever fallback)
-                // and tmux renders into a sliver in the corner.
-                //
-                // Also fall back to the terminal's *current* cols/rows
-                // (in case sizeChanged never fired because the size
-                // matched the initial value, which can happen for
-                // rapidly-attached agents).
-                if let cols = self.pendingCols, let rows = self.pendingRows {
-                    session.resize(cols: cols, rows: rows)
-                    self.pendingCols = nil
-                    self.pendingRows = nil
-                } else if let term = self.terminalView?.getTerminal(),
-                          term.cols > 1, term.rows > 1 {
-                    session.resize(cols: term.cols, rows: term.rows)
+                // Apply the post-layout size to the freshly-opened PTY.
+                // Three paths (in priority order):
+                //   1. pendingCols/Rows captured during the async wait
+                //   2. terminal.cols/rows (if SwiftTerm has measured)
+                //   3. delayed retry — last resort if layout hasn't
+                //      settled by the time the session opens
+                self.applyKnownSizeToSession(session)
+
+                // Belt-and-braces: after a short delay, force-resize
+                // using whatever SwiftTerm reports then. Handles the
+                // case where the view IS sized but processSizeChange
+                // hasn't fired our delegate yet (e.g. cellDimension
+                // wasn't measured until first display).
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    self?.applyKnownSizeToSession(session)
                 }
             } catch {
                 self.terminalView?.feed(text: "\r\n\u{001B}[31m[failed to open session: \(error.localizedDescription)]\u{001B}[0m\r\n")
             }
+        }
+    }
+
+    /// Push the best-known cols/rows to a (re-)opened session. Tries
+    /// pending size first (captured before session existed), then the
+    /// terminal's reported size. No-op if the terminal has nothing
+    /// useful to report.
+    private func applyKnownSizeToSession(_ session: TerminalSession) {
+        if let cols = pendingCols, let rows = pendingRows, cols > 1, rows > 1 {
+            session.resize(cols: cols, rows: rows)
+            pendingCols = nil
+            pendingRows = nil
+            return
+        }
+        if let term = terminalView?.getTerminal(), term.cols > 1, term.rows > 1 {
+            session.resize(cols: term.cols, rows: term.rows)
         }
     }
 

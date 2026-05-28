@@ -131,29 +131,28 @@ struct WorkspacePane: View {
 
     @ViewBuilder
     private var workspaceContent: some View {
-        // ZStack keeps every visited agent's TerminalView alive in
-        // the view tree. Only the active one is opaque + hit-testable.
-        // SwiftUI preserves the underlying NSViews (so SwiftTerm
-        // state survives), which means our TerminalCoordinator's
-        // SSH channel + tmux client + session stay alive across
-        // agent switches. Instant switching, zero churn.
+        // Use GeometryReader to FORCE explicit size on each child.
+        // ZStack-with-opacity was collapsing children to their
+        // intrinsic sizes; this gives the proposed size directly to
+        // each AgentTerminalView so SwiftTerm always gets the full
+        // workspace dimensions.
         //
-        // CRITICAL: every child in the ZStack needs explicit fill
-        // sizing, otherwise the ZStack collapses to the smallest
-        // child's intrinsic content size (a SwiftTerm view's
-        // intrinsic size is tiny — one cell tall by default — which
-        // squashes everything to the top-left corner).
-        ZStack {
-            ForEach(appState.visitedAgents) { agent in
-                AgentTerminalView(agent: agent)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .opacity(appState.activeAgentId == agent.id ? 1 : 0)
-                    .allowsHitTesting(appState.activeAgentId == agent.id)
-            }
+        // Per-agent session registry: every visited agent stays in
+        // the view tree as a hidden frame underneath, so its SSH
+        // channel + tmux client stay alive between switches.
+        GeometryReader { geom in
+            ZStack {
+                ForEach(appState.visitedAgents) { agent in
+                    AgentTerminalView(agent: agent)
+                        .frame(width: geom.size.width, height: geom.size.height)
+                        .opacity(appState.activeAgentId == agent.id ? 1 : 0)
+                        .allowsHitTesting(appState.activeAgentId == agent.id)
+                }
 
-            if appState.visitedAgents.isEmpty || appState.activeAgentId == nil {
-                EmptyWorkspace()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if appState.visitedAgents.isEmpty || appState.activeAgentId == nil {
+                    EmptyWorkspace()
+                        .frame(width: geom.size.width, height: geom.size.height)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
