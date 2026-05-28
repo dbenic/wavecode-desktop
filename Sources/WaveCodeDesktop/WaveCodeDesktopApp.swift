@@ -34,6 +34,36 @@ struct WaveCodeDesktopApp: App {
                 Button("Command Palette…") { appState.paletteOpen = true }
                     .keyboardShortcut("k", modifiers: .command)
             }
+
+            // View → font size shortcuts. These mutate the shared
+            // TerminalPrefs which the open TerminalHosts observe and
+            // re-apply via updateNSView.
+            CommandGroup(after: .toolbar) {
+                Divider()
+                Button("Increase Font Size") {
+                    appState.terminalPrefs.increaseSize()
+                }
+                .keyboardShortcut("=", modifiers: .command) // ⌘+ on US layout
+                Button("Decrease Font Size") {
+                    appState.terminalPrefs.decreaseSize()
+                }
+                .keyboardShortcut("-", modifiers: .command)
+                Button("Reset Font Size") {
+                    appState.terminalPrefs.resetSize()
+                }
+                .keyboardShortcut("0", modifiers: .command)
+            }
+
+            // Edit menu: ⌘V routes through to the active terminal's
+            // PTY (wrapped in bracketed-paste markers so shells don't
+            // auto-execute multi-line content).
+            CommandGroup(replacing: .pasteboard) {
+                Button("Paste") {
+                    appState.activeTerminalCoordinator?.pasteFromClipboard()
+                }
+                .keyboardShortcut("v", modifiers: .command)
+                .disabled(appState.activeTerminalCoordinator == nil)
+            }
         }
 
         // Separate window for a single agent's terminal (multi-window pattern).

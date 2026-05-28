@@ -73,15 +73,17 @@ struct AgentTerminalWindow: View {
 /// TerminalCoordinator.
 struct TerminalHost: NSViewRepresentable {
     let tmuxSession: String
+    @Environment(AppState.self) private var appState
 
     func makeCoordinator() -> TerminalCoordinator {
-        TerminalCoordinator(tmuxSession: tmuxSession)
+        TerminalCoordinator(tmuxSession: tmuxSession, appState: appState)
     }
 
     func makeNSView(context: Context) -> TerminalView {
         let view = TerminalView()
         view.configureNativeColors()
         view.allowMouseReporting = true
+        view.font = appState.terminalPrefs.makeFont()
         view.terminalDelegate = context.coordinator
         // Ensure the NSView grows with its container so SwiftTerm reports
         // accurate cols/rows for the layout we actually have on screen.
@@ -92,6 +94,12 @@ struct TerminalHost: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {
+        // Live-update font when prefs change.
+        let want = appState.terminalPrefs.makeFont()
+        if nsView.font.pointSize != want.pointSize ||
+           nsView.font.fontName != want.fontName {
+            nsView.font = want
+        }
         if context.coordinator.tmuxSession != tmuxSession {
             context.coordinator.tmuxSession = tmuxSession
             context.coordinator.reattach(to: nsView)
@@ -110,16 +118,19 @@ struct TerminalHost: NSViewRepresentable {
 final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     var tmuxSession: String
     private weak var terminalView: TerminalView?
+    private weak var appState: AppState?
     private var session: TerminalSession?
     private var wheelMonitor: Any?
 
-    init(tmuxSession: String) {
+    init(tmuxSession: String, appState: AppState) {
         self.tmuxSession = tmuxSession
+        self.appState = appState
     }
 
     func attach(to view: TerminalView) {
         self.terminalView = view
         installWheelForwarder(on: view)
+        registerAsActive()
         startSession()
     }
 
@@ -128,6 +139,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         wheelMonitor = nil
         self.terminalView = view
         installWheelForwarder(on: view)
+        registerAsActive()
         session?.close()
         session = nil
         clearTerminal()
@@ -137,9 +149,23 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     func detach() {
         WheelForwarder.uninstall(wheelMonitor)
         wheelMonitor = nil
+        // Only clear AppState's pointer if we're still the active one
+        // (a newer coordinator may have taken over before this teardown).
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.appState?.activeTerminalCoordinator === self {
+                self.appState?.activeTerminalCoordinator = nil
+            }
+        }
         session?.close()
         session = nil
         terminalView = nil
+    }
+
+    private func registerAsActive() {
+        Task { @MainActor [weak self] in
+            self?.appState?.activeTerminalCoordinator = self
+        }
     }
 
     private func installWheelForwarder(on view: TerminalView) {
@@ -151,6 +177,21 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     /// ESC[H = home cursor.
     private func clearTerminal() {
         terminalView?.feed(text: "\u{001B}[2J\u{001B}[3J\u{001B}[H")
+    }
+
+    /// Pull text from NSPasteboard and send it through the active PTY.
+    /// Wired to ⌘V at the App's command level. No-op when no session is
+    /// open or the pasteboard is empty / non-textual.
+    func pasteFromClipboard() {
+        guard let session else { return }
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        // Bracketed-paste-aware terminals (tmux/bash/zsh) handle the
+        // \e[200~ ... \e[201~ envelope to distinguish typed input from
+        // pasted input (so the shell doesn't auto-execute multi-line
+        // commands). Tmux passes it through to the program inside.
+        let bracketed = "\u{1B}[200~" + text + "\u{1B}[201~"
+        let bytes = Array(bracketed.utf8)
+        session.send(ArraySlice(bytes))
     }
 
     private func startSession() {
@@ -184,13 +225,21 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         //     (it's part of util-linux on every modern Linux), we
         //     still keep the SSH channel alive so the user sees the
         //     error and can debug from a shell.
-        // `tmux set -g mouse on` enables mouse-driven scrollback via
-        // tmux's copy mode. With this on (and our WaveTerminalView
-        // forwarding wheel events to mouse mode), the scroll wheel
-        // "just works" for navigating tmux history. The 2>/dev/null
-        // swallows the harmless "no server running" error if this is
-        // the first command before tmux server starts.
-        let inner = "stty cols \(cols) rows \(rows); tmux set -g mouse on 2>/dev/null; tmux attach -t \(tmuxSession)"
+        // Three tmux server-level settings, all best-effort (2>/dev/null
+        // swallows errors if tmux server isn't up yet or already configured):
+        //   - mouse on: enable wheel scrolling via tmux copy mode
+        //   - set-clipboard on: OSC 52 escape sequence on copy → tmux's
+        //     selection lands on our OS clipboard automatically
+        //   - history-limit 100000: deep scrollback (default is only ~2000)
+        //
+        // These are global server settings that persist until tmux server
+        // restart. Sensible defaults that most modern users want.
+        let tmuxSetup = """
+        tmux set -g mouse on 2>/dev/null; \
+        tmux set -g set-clipboard on 2>/dev/null; \
+        tmux set -g history-limit 100000 2>/dev/null
+        """
+        let inner = "stty cols \(cols) rows \(rows); \(tmuxSetup); tmux attach -t \(tmuxSession)"
         let command = "TERM=xterm-256color script -qc '\(inner)' /dev/null || true"
 
         Task { @MainActor in

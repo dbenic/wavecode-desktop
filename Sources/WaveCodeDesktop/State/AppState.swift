@@ -37,8 +37,15 @@ final class AppState {
     var paletteOpen: Bool = false
     var sidebarCollapsed: Bool = false
 
+    /// Set by the open TerminalCoordinator so the App's ⌘V command can
+    /// reach the active session. Weak so swapping agents doesn't leak.
+    weak var activeTerminalCoordinator: TerminalCoordinator? = nil
+
     // MARK: - Cached server views (driven by SSE; not authoritative)
     var agents: [Agent] = []
+
+    // MARK: - Terminal display prefs
+    let terminalPrefs = TerminalPrefs()
 
     init() {
         let (loaded, active) = ProfileStorage.loadAll()

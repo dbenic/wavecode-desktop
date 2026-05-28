@@ -15,9 +15,67 @@ struct SettingsView: View {
         TabView {
             ServerProfilesPane()
                 .tabItem { Label("Servers", systemImage: "server.rack") }
+            DisplayPane()
+                .tabItem { Label("Display", systemImage: "textformat") }
         }
         .padding()
         .frame(width: 720, height: 460)
+    }
+}
+
+/// Terminal font + size + line spacing. Settings are persisted to
+/// UserDefaults and applied live to all open terminal views.
+struct DisplayPane: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        @Bindable var prefs = appState.terminalPrefs
+
+        Form {
+            Section("Font") {
+                Picker("Family", selection: $prefs.fontFamily) {
+                    ForEach(TerminalPrefs.suggestedFonts, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+
+                HStack {
+                    Text("Size")
+                    Slider(value: $prefs.fontSize, in: 9...24, step: 1)
+                    Text("\(Int(prefs.fontSize)) pt")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 50, alignment: .trailing)
+                }
+
+                HStack {
+                    Button("Reset to default") { prefs.resetSize() }
+                    Spacer()
+                    Text("⌘+ / ⌘− / ⌘0 to adjust on the fly")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Section("Preview") {
+                FontPreview(font: prefs.makeFont())
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct FontPreview: View {
+    let font: NSFont
+
+    var body: some View {
+        Text("$ ls -la\ntotal 42\ndrwxr-xr-x  3 user  staff   96 May 28 09:00 .\n-rw-r--r--  1 user  staff  128 May 28 09:00 README.md")
+            .font(.init(font))
+            .foregroundStyle(.primary)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(red: 0.008, green: 0.024, blue: 0.090), in: RoundedRectangle(cornerRadius: 6))
+            .foregroundStyle(.white)
     }
 }
 
