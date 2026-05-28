@@ -119,6 +119,11 @@ final class ConnectionManager {
         await ptyClient.disconnect()
         loadedEd25519Key = nil
         appState.connectionStatus = .disconnected
+        // New connection target = previous agents are unreachable.
+        // Drop the visited set so we don't try to re-render dead
+        // TerminalViews against a fresh SSH connection.
+        appState.clearVisited()
+        appState.agents = []
         log.info("ssh: disconnected")
     }
 

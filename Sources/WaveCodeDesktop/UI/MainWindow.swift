@@ -106,10 +106,24 @@ struct WorkspacePane: View {
     var body: some View {
         if appState.connectionStatus != .connected {
             ConnectionGate()
-        } else if let id = appState.activeAgentId, let agent = appState.agent(byId: id) {
-            AgentTerminalView(agent: agent)
         } else {
-            EmptyWorkspace()
+            // ZStack keeps every visited agent's TerminalView alive in
+            // the view tree. Only the active one is opaque + hit-testable.
+            // SwiftUI preserves the underlying NSViews (so SwiftTerm
+            // state survives), which means our TerminalCoordinator's
+            // SSH channel + tmux client + session stay alive across
+            // agent switches. Instant switching, zero churn.
+            ZStack {
+                ForEach(appState.visitedAgents) { agent in
+                    AgentTerminalView(agent: agent)
+                        .opacity(appState.activeAgentId == agent.id ? 1 : 0)
+                        .allowsHitTesting(appState.activeAgentId == agent.id)
+                }
+
+                if appState.visitedAgents.isEmpty || appState.activeAgentId == nil {
+                    EmptyWorkspace()
+                }
+            }
         }
     }
 }
