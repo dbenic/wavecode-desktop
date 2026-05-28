@@ -117,11 +117,15 @@ struct WorkspacePane: View {
         // states (reconnecting / error) without hiding cached terminals.
         if appState.connectionStatus != .connected && appState.visitedAgentIds.isEmpty {
             ConnectionGate()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 0) {
                 ConnectionBanner()
+                    .fixedSize(horizontal: false, vertical: true)
                 workspaceContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -133,17 +137,26 @@ struct WorkspacePane: View {
         // state survives), which means our TerminalCoordinator's
         // SSH channel + tmux client + session stay alive across
         // agent switches. Instant switching, zero churn.
+        //
+        // CRITICAL: every child in the ZStack needs explicit fill
+        // sizing, otherwise the ZStack collapses to the smallest
+        // child's intrinsic content size (a SwiftTerm view's
+        // intrinsic size is tiny — one cell tall by default — which
+        // squashes everything to the top-left corner).
         ZStack {
             ForEach(appState.visitedAgents) { agent in
                 AgentTerminalView(agent: agent)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(appState.activeAgentId == agent.id ? 1 : 0)
                     .allowsHitTesting(appState.activeAgentId == agent.id)
             }
 
             if appState.visitedAgents.isEmpty || appState.activeAgentId == nil {
                 EmptyWorkspace()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
