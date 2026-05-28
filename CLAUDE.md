@@ -38,6 +38,40 @@ the desktop can author state independently. When the desktop "creates"
 something, it's making an HTTP POST to the server, which is the canonical
 write.
 
+### 2a. THE NO-KILL RULE — tmux sessions on the server must outlive
+       every possible client failure mode, no exceptions.
+
+This is the foundational promise of WaveCode: agents run server-side
+in tmux so they keep working when the user's laptop sleeps / loses
+network / crashes / shuts down. Nothing the desktop client does can
+be allowed to terminate a tmux session on the server.
+
+Concretely:
+
+  - The desktop NEVER calls `tmux kill-session`, `tmux kill-window`,
+    `tmux kill-pane`, or any equivalent.
+  - Agent switching MUST keep prior agents' SSH channels alive (the
+    per-agent session registry pattern — see WorkspacePane).
+  - `PTYSession.close()` sends Ctrl-b d (tmux's detach binding) BEFORE
+    closing the SSH channel, so tmux exits via its own clean detach
+    path. The bare `channel.close()` path was empirically destroying
+    sessions; we don't trust it without the Ctrl-b d prefix.
+  - `NIOSSHPTYClient.disconnect()` closes the parent SSH connection
+    only. It does NOT iterate child channels and close each — the
+    server-side sshd handles cleanup via the normal TCP-drop path
+    (SIGHUP to each tmux client, which detaches without killing).
+  - On app quit / laptop shutdown / network drop, the process just
+    dies and the TCP connection drops. Server-side cleanup is via
+    the standard sshd timeout path, which has been safe for tmux
+    since forever.
+
+Tests for any new code path that touches an SSH channel:
+  1. Open `ssh wave tmux ls` in a separate terminal.
+  2. Trigger the new code path in the app.
+  3. Confirm `tmux ls` shows the same sessions before and after.
+
+If you can't pass that test, the code path is wrong.
+
 ### 3. Tmux is the work surface, not a rendered abstraction.
 
 The terminal area embeds SwiftTerm rendering a real PTY connected to a
