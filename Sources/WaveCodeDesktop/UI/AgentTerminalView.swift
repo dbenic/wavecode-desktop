@@ -50,6 +50,7 @@ struct AgentTerminalView: View {
                     .fill(WaveColors.divider)
                     .frame(height: 1)
             }
+            .fixedSize(horizontal: false, vertical: true)
 
             TerminalHost(tmuxSession: agent.tmuxSession)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -154,20 +155,26 @@ private final class TerminalHostContainer: NSView {
     /// fires within the same layout pass.
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        syncInnerFrame()
+        syncInnerFrame(source: "setFrameSize")
     }
 
     /// layout() is also called by AppKit during the layout pass —
     /// secondary path in case setFrameSize hasn't kept up.
     override func layout() {
         super.layout()
-        syncInnerFrame()
+        syncInnerFrame(source: "layout")
     }
 
-    private func syncInnerFrame() {
-        guard let term = terminalView else { return }
+    private func syncInnerFrame(source: String) {
+        guard let term = terminalView else {
+            print("[TerminalHostContainer] \(source): no terminalView yet (bounds=\(bounds))")
+            return
+        }
         if term.frame != bounds {
+            let before = (term.getTerminal().cols, term.getTerminal().rows)
             term.frame = bounds
+            let after = (term.getTerminal().cols, term.getTerminal().rows)
+            print("[TerminalHostContainer] \(source): set term.frame=\(bounds) cols/rows \(before) -> \(after)")
         }
     }
 
@@ -414,13 +421,18 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     /// useful to report.
     private func applyKnownSizeToSession(_ session: TerminalSession) {
         if let cols = pendingCols, let rows = pendingRows, cols > 1, rows > 1 {
+            print("[TerminalCoordinator] applyKnownSize: pending \(cols)x\(rows)")
             session.resize(cols: cols, rows: rows)
             pendingCols = nil
             pendingRows = nil
             return
         }
         if let term = terminalView?.getTerminal(), term.cols > 1, term.rows > 1 {
+            print("[TerminalCoordinator] applyKnownSize: from terminal \(term.cols)x\(term.rows)")
             session.resize(cols: term.cols, rows: term.rows)
+        } else {
+            let t = terminalView?.getTerminal()
+            print("[TerminalCoordinator] applyKnownSize: nothing useful (term.cols=\(t?.cols ?? -1) term.rows=\(t?.rows ?? -1) view bounds=\(terminalView?.bounds.size ?? .zero))")
         }
     }
 
@@ -492,6 +504,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         // this, the post-layout sizeChanged that fires after we kick
         // off openTerminalSession would be lost and the PTY would
         // remain at its tiny initial dimensions forever.
+        print("[TerminalCoordinator] sizeChanged \(newCols)x\(newRows), session=\(session != nil ? "yes" : "no")")
         if let session = session {
             session.resize(cols: newCols, rows: newRows)
         } else {
