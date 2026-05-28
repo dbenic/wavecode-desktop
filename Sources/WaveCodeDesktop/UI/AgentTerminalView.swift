@@ -326,8 +326,44 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
 
     private func startSession() {
         let tmuxSession = self.tmuxSession
-        let cols = max(20, terminalView?.getTerminal().cols ?? 120)
-        let rows = max(5, terminalView?.getTerminal().rows ?? 30)
+
+        // CRITICAL: wait for the view to actually have a size before
+        // we open the PTY. SwiftUI calls our attach() inside makeNSView,
+        // when the view hasn't been laid out yet (frame is .zero and
+        // SwiftTerm reports cols/rows < 2). If we open the PTY with the
+        // 20×5 fallback we used to pass, tmux's session attaches at
+        // that tiny size and (with some tmux configs / versions) won't
+        // re-expand to a later window_change request. The result: tmux
+        // forever renders into a 20-column sliver, even though the
+        // OS-level PTY size is correct.
+        //
+        // Solution: yield to the run loop a few times until SwiftTerm
+        // reports real dimensions, THEN open the PTY at those
+        // dimensions. After that, sizeChanged events on subsequent
+        // resizes work normally.
+        Task { @MainActor [weak self] in
+            await self?.waitForRealSize()
+            self?.openSessionNow(tmuxSession: tmuxSession)
+        }
+    }
+
+    /// Poll up to ~1 second for SwiftTerm to report a useful size.
+    /// Most of the time it lands within one frame.
+    private func waitForRealSize() async {
+        for attempt in 0..<60 {  // 60 × ~16ms = ~1s max
+            if let term = terminalView?.getTerminal(), term.cols > 10, term.rows > 5 {
+                dlog("waitForRealSize: ready after \(attempt) frames at \(term.cols)x\(term.rows)")
+                return
+            }
+            try? await Task.sleep(nanoseconds: 16_000_000)  // ~1 frame
+        }
+        dlog("waitForRealSize: gave up after 60 frames; opening anyway")
+    }
+
+    private func openSessionNow(tmuxSession: String) {
+        let cols = max(40, terminalView?.getTerminal().cols ?? 120)
+        let rows = max(15, terminalView?.getTerminal().rows ?? 30)
+        dlog("openSessionNow tmux=\(tmuxSession) cols=\(cols) rows=\(rows)")
 
         // The command does four things:
         //
