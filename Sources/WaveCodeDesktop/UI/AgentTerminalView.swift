@@ -92,27 +92,23 @@ struct TerminalHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let container = TerminalHostContainer()
-        container.translatesAutoresizingMaskIntoConstraints = false
 
-        let term = TerminalView()
+        let term = TerminalView(frame: .zero)
         term.configureNativeColors()
         term.allowMouseReporting = true
         term.font = appState.terminalPrefs.makeFont()
         term.terminalDelegate = context.coordinator
-        term.translatesAutoresizingMaskIntoConstraints = false
+        // We manage SwiftTerm's frame manually from
+        // TerminalHostContainer.layout() so Auto Layout (which has
+        // misbehaved across our previous fix attempts here, leaving
+        // the terminal at intrinsic size) is out of the picture for
+        // the inner view. The container itself is laid out by
+        // SwiftUI via the NSViewRepresentable's proposed frame.
+        term.translatesAutoresizingMaskIntoConstraints = true
+        term.autoresizingMask = []  // do nothing — we frame it ourselves
 
         container.addSubview(term)
         container.terminalView = term
-
-        // Pin SwiftTerm to fill the container. Auto Layout (not
-        // autoresizingMask) because that's what SwiftUI's
-        // NSViewRepresentable expects underneath.
-        NSLayoutConstraint.activate([
-            term.topAnchor.constraint(equalTo: container.topAnchor),
-            term.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            term.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            term.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
 
         context.coordinator.attach(to: term)
         return container
@@ -139,11 +135,30 @@ struct TerminalHost: NSViewRepresentable {
     }
 }
 
-/// Plain NSView container that holds the SwiftTerm TerminalView. The
-/// only reason we need a subclass is to keep a typed reference to the
-/// inner TerminalView so updateNSView and dismantleNSView can find it.
+/// NSView container that holds the SwiftTerm TerminalView. We manage
+/// the inner view's frame manually here in `layout()` rather than via
+/// Auto Layout constraints. Reason: NSViewRepresentable + Auto Layout +
+/// SwiftTerm's internal sizing repeatedly produced a one-cell-tall
+/// terminal pinned to the corner. Manually setting the frame each
+/// layout cycle is deterministic — SwiftTerm's setFrameSize then
+/// processSizeChange fire synchronously, terminal.cols/rows update,
+/// and our sizeChanged delegate fires with real numbers.
 private final class TerminalHostContainer: NSView {
     weak var terminalView: TerminalView?
+
+    /// Layout the inner SwiftTerm to fill our bounds. Triggers
+    /// SwiftTerm's setFrameSize → processSizeChange → sizeChanged
+    /// delegate path every time SwiftUI resizes us.
+    override func layout() {
+        super.layout()
+        guard let term = terminalView else { return }
+        if term.frame != bounds {
+            term.frame = bounds
+        }
+    }
+
+    /// No intrinsic size — let SwiftUI's proposed frame drive sizing.
+    override var intrinsicContentSize: NSSize { .init(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric) }
 }
 
 /// Bridges SwiftTerm's TerminalView with a TerminalSession (SSH PTY).
