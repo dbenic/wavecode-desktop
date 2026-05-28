@@ -58,6 +58,11 @@ final class NIOSSHPTYClient {
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
+            // TCP keepalive: detect dead peers without waiting for an
+            // app-level write to fail. Without this, a network drop is
+            // silent until the user types something — minutes of "looks
+            // connected but isn't".
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
             .connectTimeout(.seconds(15))
 
         do {

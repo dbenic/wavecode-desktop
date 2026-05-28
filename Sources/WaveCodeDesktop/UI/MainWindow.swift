@@ -45,6 +45,13 @@ struct MainWindow: View {
             // Reconnect whenever the active profile changes.
             await ConnectionManager.shared.connect(profile: appState.activeProfile, into: appState)
         }
+        .onAppear {
+            // Wire the reconnect supervisor to this AppState. It listens
+            // to sleep/wake notifications and re-establishes the SSH
+            // connection without touching server-side tmux sessions
+            // (per CLAUDE.md §2a).
+            ReconnectSupervisor.shared.start(appState: appState)
+        }
     }
 }
 
