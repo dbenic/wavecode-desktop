@@ -145,7 +145,22 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         self.terminalView = view
         installWheelForwarder(on: view)
         registerAsActive()
-        session?.close()
+
+        // HOTFIX: do NOT close the previous session here. Closing the
+        // SSH child channel was somehow terminating the user's tmux
+        // session on the server (not just our client view), causing
+        // long-running Claude/Codex agents to die on every agent switch.
+        //
+        // Until we understand the root cause, orphan the old session:
+        // the SSH channel stays open, tmux attach keeps running on the
+        // server (the bytes it produces stream into a now-orphaned
+        // pumpTask whose callback's `terminalView` weak ref is nil →
+        // silent drop). User-visible: no data loss, no killed sessions.
+        // Cost: each switch leaks one SSH channel + one pumpTask. After
+        // hundreds of switches, the user should restart the app. We'll
+        // replace this with a proper per-agent session registry next.
+        //
+        // session?.close() ← DO NOT REINSTATE WITHOUT FIXING ROOT CAUSE.
         session = nil
         clearTerminal()
         startSession()
@@ -162,7 +177,10 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
                 self.appState?.activeTerminalCoordinator = nil
             }
         }
-        session?.close()
+        // HOTFIX: same as reattach — don't close. See comment above.
+        // The Coordinator may be torn down by SwiftUI when the view
+        // dismantles, but that doesn't mean the user wants the session
+        // killed.
         session = nil
         terminalView = nil
     }

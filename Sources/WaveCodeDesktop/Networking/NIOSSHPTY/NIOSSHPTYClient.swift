@@ -73,6 +73,17 @@ final class NIOSSHPTYClient {
     }
 
     func disconnect() async {
+        // IMPORTANT: do NOT close child PTY channels here. Closing them
+        // via NIOSSH was killing the user's tmux sessions on the server.
+        // Instead we just close the parent SSH connection; the server's
+        // sshd will see the TCP drop and clean up its side via the
+        // normal sshd timeout, which delivers a clean SIGHUP that tmux
+        // clients handle by detaching (session lives).
+        //
+        // The price: every PTYSession the caller still holds becomes a
+        // zombie when this runs. They're harmless (channel is dead,
+        // pumpTask exits when the stream finishes). The alternative —
+        // actively closing each — was destroying user work.
         if let channel = connection {
             try? await channel.close().get()
         }
@@ -81,7 +92,7 @@ final class NIOSSHPTYClient {
             try? await group.shutdownGracefully()
         }
         group = nil
-        log.info("niossh: disconnected")
+        log.info("niossh: disconnected (PTY children orphaned by design)")
     }
 
     // MARK: - Open PTY
@@ -184,8 +195,19 @@ final class PTYSession: @unchecked Sendable {
         try? await promise.futureResult.get()
     }
 
-    /// `Channel.close` is also thread-safe.
+    /// Close the SSH channel — but FIRST ask tmux to detach via its
+    /// own keystroke (Ctrl-b d). If we just close the SSH channel
+    /// directly, something in the NIOSSH/sshd/tmux interaction is
+    /// killing the underlying tmux session (not just detaching the
+    /// client). Going through tmux's own detach path side-steps that
+    /// entirely: tmux client exits cleanly, session lives on the
+    /// server, and our channel close is then closing an already-empty
+    /// process slot — nothing to SIGHUP.
     func close() async {
+        // ^B (0x02) then 'd' (0x64) = tmux default detach binding
+        await send(ArraySlice([0x02, 0x64]))
+        // Give tmux ~250 ms to receive + process the keystroke
+        try? await Task.sleep(nanoseconds: 250_000_000)
         try? await channel.close().get()
     }
 
