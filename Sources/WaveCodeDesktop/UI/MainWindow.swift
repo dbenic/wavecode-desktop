@@ -17,11 +17,15 @@ struct MainWindow: View {
         NavigationSplitView {
             Sidebar()
                 .frame(minWidth: 200, idealWidth: 220)
+                .toolbar(removing: .sidebarToggle)
         } detail: {
             WorkspacePane()
         }
         .navigationTitle("WaveCode")
         .navigationSubtitle(appState.activeProfile.label)
+        .toolbarBackground(WaveColors.chrome, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
+        .toolbarColorScheme(.dark, for: .windowToolbar)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 ServerPicker()
@@ -32,6 +36,7 @@ struct MainWindow: View {
             ToolbarItem(placement: .primaryAction) {
                 Button { appState.paletteOpen = true } label: {
                     Image(systemName: "command")
+                        .foregroundStyle(WaveColors.secondary)
                 }
                 .help("Command palette (⌘K)")
             }
@@ -128,22 +133,22 @@ struct ConnectionStatusPill: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(label)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .textCase(.uppercase)
-                .tracking(0.5)
+                .tracking(0.8)
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(color.opacity(0.1), in: Capsule())
+        .background(color.opacity(0.10), in: Capsule())
     }
 
     private var color: Color {
         switch appState.connectionStatus {
-        case .connected: .green
-        case .connecting, .reconnecting: .orange
-        case .error: .red
-        case .disconnected: .secondary
+        case .connected: WaveColors.statusWorking
+        case .connecting, .reconnecting: WaveColors.statusWarn
+        case .error: WaveColors.statusError
+        case .disconnected: WaveColors.tertiary
         }
     }
 

@@ -24,27 +24,32 @@ struct AgentTerminalView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header strip — agent name, status, runtime
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 StatusDot(status: agent.status)
                 Text(agent.name)
-                    .font(.system(.body, design: .monospaced).bold())
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(WaveColors.primary)
                 Text("·")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(WaveColors.muted)
                 Text(agent.runtime)
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
+                    .font(.system(size: 11))
+                    .foregroundStyle(WaveColors.tertiary)
                 Text("·")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(WaveColors.muted)
                 Text("tmux: \(agent.tmuxSession)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(WaveColors.tertiary)
                 Spacer()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.bar)
-
-            Divider()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .background(WaveColors.chrome)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(WaveColors.divider)
+                    .frame(height: 1)
+            }
 
             TerminalHost(tmuxSession: agent.tmuxSession)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
