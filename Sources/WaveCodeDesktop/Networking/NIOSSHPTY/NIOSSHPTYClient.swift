@@ -116,11 +116,17 @@ final class NIOSSHPTYClient {
 
         let sshHandler = try await connection.pipeline.handler(type: NIOSSHHandler.self).get()
         let childPromise = connection.eventLoop.makePromise(of: Channel.self)
-        sshHandler.createChannel(childPromise, channelType: .session) { childChannel, channelType in
-            guard channelType == .session else {
-                return childChannel.eventLoop.makeFailedFuture(PTYError.wrongChannelType)
+
+        // createChannel mutates NIOSSHHandler state that's only safe to
+        // touch from the parent channel's event loop. Dispatch onto it.
+        let eventLoop = connection.eventLoop
+        eventLoop.execute {
+            sshHandler.createChannel(childPromise, channelType: .session) { childChannel, channelType in
+                guard channelType == .session else {
+                    return childChannel.eventLoop.makeFailedFuture(PTYError.wrongChannelType)
+                }
+                return childChannel.pipeline.addHandler(handler)
             }
-            return childChannel.pipeline.addHandler(handler)
         }
         let childChannel = try await childPromise.futureResult.get()
 
@@ -153,6 +159,7 @@ final class PTYSession: @unchecked Sendable {
     }
 
     /// Send bytes to the remote PTY's stdin.
+    /// `Channel.writeAndFlush` is thread-safe — NIO dispatches internally.
     func send(_ bytes: ArraySlice<UInt8>) async {
         var buf = channel.allocator.buffer(capacity: bytes.count)
         buf.writeBytes(bytes)
@@ -161,6 +168,7 @@ final class PTYSession: @unchecked Sendable {
 
     /// Send an SSH `window_change` message — the kernel-level resize
     /// signal that `stty cols/rows` was always a hack around.
+    /// `triggerUserOutboundEvent` requires the channel's event loop.
     func resize(cols: Int, rows: Int) async {
         let evt = SSHChannelRequestEvent.WindowChangeRequest(
             terminalCharacterWidth: cols,
@@ -168,9 +176,15 @@ final class PTYSession: @unchecked Sendable {
             terminalPixelWidth: 0,
             terminalPixelHeight: 0
         )
-        try? await channel.triggerUserOutboundEvent(evt).get()
+        let promise = channel.eventLoop.makePromise(of: Void.self)
+        let chan = channel
+        channel.eventLoop.execute {
+            chan.triggerUserOutboundEvent(evt).cascade(to: promise)
+        }
+        try? await promise.futureResult.get()
     }
 
+    /// `Channel.close` is also thread-safe.
     func close() async {
         try? await channel.close().get()
     }
