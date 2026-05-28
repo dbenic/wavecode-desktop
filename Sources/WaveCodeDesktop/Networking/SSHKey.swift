@@ -102,6 +102,21 @@ enum SSHAuthError: LocalizedError {
 }
 
 enum SSHKey {
+    /// Load just an Ed25519 private key from `~/.ssh/id_ed25519` (or
+    /// fail). Used by the NIOSSH-direct PTY client which can't use
+    /// Citadel's broken-against-modern-OpenSSH RSA path. Returns nil
+    /// if no Ed25519 key is found / readable.
+    static func loadEd25519IfPresent() -> Curve25519.Signing.PrivateKey? {
+        guard let home = FileManager.default.homeDirectoryForCurrentUser as URL? else { return nil }
+        let url = home.appendingPathComponent(".ssh/id_ed25519")
+        guard FileManager.default.isReadableFile(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let key = try? Curve25519.Signing.PrivateKey(sshEd25519: data) else {
+            return nil
+        }
+        return key
+    }
+
     /// Try the standard `~/.ssh/` key chain. Returns the first one we
     /// can build into an `SSHAuthenticationMethod`, with metadata for
     /// downstream error reporting.

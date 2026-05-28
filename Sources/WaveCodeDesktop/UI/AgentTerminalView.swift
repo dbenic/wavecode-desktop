@@ -256,8 +256,10 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
                     self.terminalView?.feed(text: "\r\n\u{001B}[31m[not connected — connect to the server first]\u{001B}[0m\r\n")
                     return
                 }
-                let session = try manager.openTerminalSession(
+                let session = try await manager.openTerminalSession(
                     command: command,
+                    cols: cols,
+                    rows: rows,
                     onBytes: { [weak self] bytes in
                         guard let view = self?.terminalView else { return }
                         // Bytes arrive on the SSH I/O task; SwiftTerm's
@@ -288,21 +290,10 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     }
 
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        // SwiftTerm tells us the user resized the window. We can't send
-        // a real SSH window_change message through Citadel's withTTY
-        // (it doesn't expose the channel), so the workaround is to
-        // shell out: tell the remote shell to re-stty its tty, then
-        // kick tmux to redraw via SIGWINCH on the script process.
-        //
-        // This isn't perfect — typed characters get this command
-        // interleaved into wherever tmux's input is at — but for the
-        // moment between agent attaches and major resizes it's the
-        // pragmatic stopgap. A NIOSSH-direct PTY refactor will replace
-        // this with proper window_change events.
-        guard let session = session else { return }
-        let cmd = "\u{0003}stty cols \(newCols) rows \(newRows); tmux refresh-client -S 2>/dev/null\n"
-        let bytes = Array(cmd.utf8)
-        session.send(ArraySlice(bytes))
+        // Real SSH window_change message — the kernel signals SIGWINCH
+        // to the remote process and tmux redraws cleanly. No stdin
+        // interleaving, no artifacts, no `stty` hack.
+        session?.resize(cols: newCols, rows: newRows)
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {

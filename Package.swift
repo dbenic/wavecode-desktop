@@ -26,8 +26,23 @@ let package = Package(
     ],
     dependencies: [
         // Pure-Swift SSH client — async/await native, modern, MIT.
+        // We use Citadel for the high-level connection + executeCommand
+        // (curl over SSH for the WaveCode API fetch). PTYs are handled
+        // directly via NIOSSH because Citadel doesn't expose
+        // window_change or proper controlling-terminal semantics.
         // https://github.com/orlandos-nl/Citadel
         .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.7.0"),
+
+        // Apple's low-level SSH library — what Citadel wraps. We use it
+        // directly for PTY channels so we can request a proper PTY with
+        // terminal modes set, send SSH window_change messages on resize,
+        // and avoid the `script` wrapper hack.
+        //
+        // Citadel pins an older fork (wellz26/swift-nio-ssh) at 0.3.x —
+        // we point at the same fork at the same range so SPM resolves
+        // one version of the package. When Citadel upgrades, we follow.
+        // https://github.com/wellz26/swift-nio-ssh
+        .package(url: "https://github.com/wellz26/swift-nio-ssh.git", from: "0.3.4"),
 
         // Native macOS terminal renderer using CoreText. Apache 2.0.
         // https://github.com/migueldeicaza/SwiftTerm
@@ -38,6 +53,7 @@ let package = Package(
             name: "WaveCodeDesktop",
             dependencies: [
                 .product(name: "Citadel", package: "Citadel"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             path: "Sources/WaveCodeDesktop",

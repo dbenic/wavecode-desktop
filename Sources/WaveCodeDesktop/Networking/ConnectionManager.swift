@@ -10,6 +10,7 @@
 
 import Foundation
 import Citadel
+import Crypto
 import OSLog
 
 @MainActor
@@ -19,11 +20,19 @@ final class ConnectionManager {
     private let log = Logger(subsystem: "com.wavenetic.wavecode-desktop", category: "ssh")
     private let api = WaveCodeAPI()
 
-    /// Citadel's SSHClient is a `final class` that performs its own
-    /// internal NIO-based locking — thread-safe in practice.
+    /// Citadel handles the high-level conveniences (executeCommand for
+    /// the WaveCode API fetch). It's a `final class` that performs its
+    /// own internal NIO-based locking — thread-safe in practice.
     private var client: SSHClient?
     private var activePort: Int = 3777
     private var agentRefreshTask: Task<Void, Never>?
+
+    /// Direct-NIOSSH client for PTY (terminal) channels. Separate
+    /// connection from Citadel so we can request PTYs with proper
+    /// controlling-terminal semantics + window_change support — things
+    /// Citadel's withTTY API doesn't expose.
+    private let ptyClient = NIOSSHPTYClient()
+    private var loadedEd25519Key: Curve25519.Signing.PrivateKey?
 
     private init() {}
 
@@ -65,6 +74,27 @@ final class ConnectionManager {
             }
             self.client = newClient
             self.activePort = profile.wavecodePort
+
+            // Also bring up the NIOSSH-direct connection used for PTYs.
+            // For now we require an Ed25519 key (the only auth path
+            // NIOSSH-side supports cleanly; same key the user already
+            // proved works via Citadel).
+            if let ed25519 = SSHKey.loadEd25519IfPresent() {
+                do {
+                    try await ptyClient.connect(
+                        host: profile.sshHost,
+                        port: profile.sshPort,
+                        username: username,
+                        ed25519Key: ed25519
+                    )
+                    self.loadedEd25519Key = ed25519
+                } catch {
+                    log.warning("niossh: PTY client connect failed (terminals will be unavailable): \(String(describing: error), privacy: .public)")
+                }
+            } else {
+                log.warning("niossh: no Ed25519 key — terminals will be unavailable. Generate one with: ssh-keygen -t ed25519")
+            }
+
             appState.connectionStatus = .connected
             log.info("ssh: connected as \(username, privacy: .public)")
 
@@ -86,6 +116,8 @@ final class ConnectionManager {
             try? await client.close()
         }
         client = nil
+        await ptyClient.disconnect()
+        loadedEd25519Key = nil
         appState.connectionStatus = .disconnected
         log.info("ssh: disconnected")
     }
@@ -107,26 +139,33 @@ final class ConnectionManager {
         }
     }
 
-    /// Open a TTY session running `command` (typically `tmux attach -t …`)
-    /// and start streaming bytes to `onBytes`. Returns the session so the
-    /// caller can `send(...)` keystrokes and `close()` on view teardown.
+    /// Open a PTY-backed shell session that immediately exec's
+    /// `command` (typically `tmux attach -t …`). Returns a session
+    /// the caller uses to send keystrokes, resize, and close.
     ///
-    /// Throws if there is no active SSH connection.
+    /// Throws if there is no active NIOSSH PTY connection.
     func openTerminalSession(
         command: String,
+        cols: Int,
+        rows: Int,
         onBytes: @escaping TerminalByteSink,
         onClosed: @escaping @Sendable (Error?) -> Void = { _ in }
-    ) throws -> TerminalSession {
-        guard let client else {
+    ) async throws -> TerminalSession {
+        guard ptyClient.isConnected else {
             throw NSError(
                 domain: "WaveCodeDesktop",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "No active SSH connection"]
+                userInfo: [NSLocalizedDescriptionKey:
+                    "PTY connection unavailable — generate an Ed25519 SSH key (ssh-keygen -t ed25519) and authorize it on the server."]
             )
         }
+        let ptySession = try await ptyClient.openShellPTY(
+            cols: cols,
+            rows: rows,
+            command: command
+        )
         let session = TerminalSession(
-            client: client,
-            command: command,
+            ptySession: ptySession,
             onBytes: onBytes,
             onClosed: onClosed
         )
