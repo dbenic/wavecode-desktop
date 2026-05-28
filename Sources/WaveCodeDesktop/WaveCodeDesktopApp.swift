@@ -54,15 +54,36 @@ struct WaveCodeDesktopApp: App {
                 .keyboardShortcut("0", modifiers: .command)
             }
 
-            // Edit menu: ⌘V routes through to the active terminal's
-            // PTY (wrapped in bracketed-paste markers so shells don't
-            // auto-execute multi-line content).
+            // Edit menu: Copy / Paste / Select All wired to the terminal.
+            //   - Copy (⌘C): routed through the responder chain to
+            //     SwiftTerm's copy(_:), which copies the current native
+            //     selection to the macOS pasteboard. (tmux's own mouse
+            //     selection is handled separately via OSC 52 + our
+            //     clipboardCopy delegate — see TerminalCoordinator.)
+            //   - Paste (⌘V): sends clipboard to the PTY with bracketed
+            //     paste markers so shells don't auto-execute multi-line
+            //     content.
+            //   - Select All (⌘A): SwiftTerm selects the whole buffer.
+            //
+            // Previously this group defined only Paste, which (because
+            // `replacing:` wipes the whole group) removed Copy/Select-All
+            // and prevented ⌘C from ever reaching SwiftTerm.
             CommandGroup(replacing: .pasteboard) {
+                Button("Copy") {
+                    NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("c", modifiers: .command)
+
                 Button("Paste") {
                     appState.activeTerminalCoordinator?.pasteFromClipboard()
                 }
                 .keyboardShortcut("v", modifiers: .command)
                 .disabled(appState.activeTerminalCoordinator == nil)
+
+                Button("Select All") {
+                    NSApp.sendAction(#selector(NSResponder.selectAll(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("a", modifiers: .command)
             }
         }
 
