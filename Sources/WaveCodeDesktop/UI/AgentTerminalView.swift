@@ -127,12 +127,28 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     private var session: TerminalSession?
     private var wheelMonitor: Any?
 
+    // Coalesce inbound byte chunks within one display frame so heavy
+    // output (build logs, big diffs) doesn't trigger one render per
+    // tiny SSH chunk. Buffer-and-flush approach: bytes arrive on the
+    // SSH I/O queue → appended to a buffer guarded by a serial queue
+    // → a coalescing timer (or immediate if first byte) drains to
+    // SwiftTerm on the main thread.
+    private let coalesceQueue = DispatchQueue(label: "com.wavenetic.wavecode-desktop.terminal.coalesce")
+    private var coalesceBuffer: [UInt8] = []
+    private var coalesceScheduled = false
+    private static let coalesceWindowMs: Int = 16  // ~1 frame at 60 Hz
+
     init(tmuxSession: String, appState: AppState) {
         self.tmuxSession = tmuxSession
         self.appState = appState
     }
 
     func attach(to view: TerminalView) {
+        // Defensive: SwiftUI shouldn't call makeNSView twice for the
+        // same coordinator, but if it ever did, we'd leak the prior
+        // event monitor. Uninstall first for symmetry with reattach.
+        WheelForwarder.uninstall(wheelMonitor)
+        wheelMonitor = nil
         self.terminalView = view
         installWheelForwarder(on: view)
         registerAsActive()
@@ -279,15 +295,16 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
                     cols: cols,
                     rows: rows,
                     onBytes: { [weak self] bytes in
-                        guard let view = self?.terminalView else { return }
-                        // Bytes arrive on the SSH I/O task; SwiftTerm's
-                        // feed must be called on main.
-                        Task { @MainActor in
-                            view.feed(byteArray: bytes)
-                        }
+                        // Coalesce instead of feeding immediately — see
+                        // enqueueBytes for the rationale.
+                        self?.enqueueBytes(bytes)
                     },
                     onClosed: { [weak self] error in
                         Task { @MainActor in
+                            // Flush any pending coalesced bytes before
+                            // the closed message so we don't lose the
+                            // tail of the output.
+                            self?.flushCoalesceBufferImmediately()
                             let msg = error.map { "[session closed: \($0.localizedDescription)]" }
                                 ?? "[session closed]"
                             self?.terminalView?.feed(text: "\r\n\u{001B}[90m\(msg)\u{001B}[0m\r\n")
@@ -299,6 +316,58 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
                 self.terminalView?.feed(text: "\r\n\u{001B}[31m[failed to open session: \(error.localizedDescription)]\u{001B}[0m\r\n")
             }
         }
+    }
+
+    // MARK: - Output coalescing
+
+    /// Called from the SSH I/O task whenever a chunk of bytes arrives
+    /// from the remote PTY. Appends to a buffer (on a serial queue to
+    /// avoid races between concurrent SSH chunk deliveries), then
+    /// either schedules a frame-aligned flush or — if already
+    /// scheduled — just lets the existing timer fire.
+    ///
+    /// The net effect: dozens of tiny chunks during a heavy redraw
+    /// (cargo build, vim re-paint) collapse into one feed() call per
+    /// ~16 ms, which is what the display can actually present anyway.
+    /// Smoother scrolling, less CPU on render thrash.
+    private func enqueueBytes(_ bytes: ArraySlice<UInt8>) {
+        coalesceQueue.async { [weak self] in
+            guard let self else { return }
+            self.coalesceBuffer.append(contentsOf: bytes)
+            guard !self.coalesceScheduled else { return }
+            self.coalesceScheduled = true
+            self.coalesceQueue.asyncAfter(deadline: .now() + .milliseconds(Self.coalesceWindowMs)) { [weak self] in
+                self?.flushCoalescedBuffer()
+            }
+        }
+    }
+
+    private func flushCoalescedBuffer() {
+        // CRITICAL: this runs *on* coalesceQueue (it was scheduled via
+        // coalesceQueue.asyncAfter). A previous version called
+        // coalesceQueue.sync { ... } from here — that's a serial-queue
+        // re-entrant sync, which deadlocks. Drain inline instead;
+        // we're already on the right queue.
+        let pending = coalesceBuffer
+        coalesceBuffer.removeAll(keepingCapacity: true)
+        coalesceScheduled = false
+        guard !pending.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            self?.terminalView?.feed(byteArray: ArraySlice(pending))
+        }
+    }
+
+    /// Drain whatever's pending right now, used on session-end so the
+    /// user always sees the tail of the output before the close banner.
+    private func flushCoalesceBufferImmediately() {
+        let pending: [UInt8] = coalesceQueue.sync {
+            let out = coalesceBuffer
+            coalesceBuffer.removeAll(keepingCapacity: true)
+            coalesceScheduled = false
+            return out
+        }
+        guard !pending.isEmpty else { return }
+        terminalView?.feed(byteArray: ArraySlice(pending))
     }
 
     // MARK: - TerminalViewDelegate

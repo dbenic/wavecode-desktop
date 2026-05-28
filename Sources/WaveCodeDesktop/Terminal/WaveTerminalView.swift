@@ -24,8 +24,11 @@ import SwiftTerm
 enum WheelForwarder {
     /// Install a local event monitor that intercepts scrollWheel events
     /// landing on `view` and forwards them to the remote app as xterm
-    /// SGR mouse press events. Returns the monitor token — pass it to
-    /// `uninstall` on teardown.
+    /// SGR mouse press events — but ONLY when the remote is in an
+    /// alternate-screen mode (tmux attached, vim open, less running,
+    /// htop, etc). In normal-screen mode (bare bash prompt, etc.),
+    /// scroll falls through to SwiftTerm's local scrollback so the
+    /// user sees what they expect instead of `^[[<64;5;10M` echo.
     static func install(on view: TerminalView) -> Any? {
         NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak view] event in
             guard let view = view, view.allowMouseReporting else { return event }
@@ -35,8 +38,14 @@ enum WheelForwarder {
             let pt = view.convert(event.locationInWindow, from: nil)
             guard view.bounds.contains(pt) else { return event }
 
-            // Forward to the remote and consume the event so SwiftTerm
-            // doesn't also scroll its own (empty) buffer.
+            // Only forward to the remote app when it's actively using
+            // the alt screen. Otherwise let SwiftTerm handle its own
+            // local scrollback (the normal-screen content is what's
+            // displayed and what the user expects to scroll).
+            guard view.getTerminal().isCurrentBufferAlternate else {
+                return event
+            }
+
             sendWheel(event, in: view)
             return nil
         }

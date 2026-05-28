@@ -72,6 +72,46 @@ Tests for any new code path that touches an SSH channel:
 
 If you can't pass that test, the code path is wrong.
 
+### 2b. WHY `channel.close()` empirically kills sessions
+       (the open mystery + why our hotfix holds anyway)
+
+We never fully root-caused why calling NIOSSH `channel.close()` on a
+PTY child that's running `exec tmux attach -t X` causes the underlying
+tmux session to terminate (not just detach the client), while a normal
+`ssh -t user@host tmux attach -t X` followed by Ctrl-D detaches cleanly.
+
+Working theory (unverified):
+  - NIOSSH's `channel.close()` (mode `.all`) emits SSH_MSG_CHANNEL_CLOSE
+    immediately, without flushing pending stdin or sending EOF first.
+  - sshd reacts by reaping the child process group with SIGHUP, but
+    the timing relative to tmux's SIGHUP handler may race with tmux's
+    own state machine — particularly with our PTY allocated via NIOSSH
+    rather than via openssh's pty.c (which sets up a slightly different
+    job-control posture).
+  - Result: tmux exits before its SIGHUP handler's "detach client
+    cleanly, leave server alone" path runs to completion, which
+    cascades to session teardown in some tmux configurations.
+
+This is unproven; a small NIOSSH reproducer outside the app would
+be needed to confirm. Filed for a future deep-dive.
+
+Why the hotfix holds without a root-cause fix:
+  1. `PTYSession.close()` sends Ctrl-b d before closing the SSH
+     channel, so tmux exits via its own clean detach path (the user's
+     own `Ctrl-b d` keystroke) BEFORE the close cascade runs.
+  2. The per-agent session registry in WorkspacePane means we never
+     close PTY children during normal use — only the parent SSH
+     connection closes (on profile switch / disconnect), and the
+     parent close cascades server-side via the standard sshd TCP-drop
+     path, which has always been safe for tmux.
+
+If you DO decide to investigate the root cause: build a minimal NIOSSH
+script that opens a connection, opens a PTY channel, exec's
+`tmux attach -t TESTSESSION`, then calls `channel.close()`. Compare
+`tmux ls` before and after. If sessions die, vary close mode
+(.output only), terminal modes, and whether you send a windowChange
+before close. Report findings as a PR upstream or document them here.
+
 ### 3. Tmux is the work surface, not a rendered abstraction.
 
 The terminal area embeds SwiftTerm rendering a real PTY connected to a

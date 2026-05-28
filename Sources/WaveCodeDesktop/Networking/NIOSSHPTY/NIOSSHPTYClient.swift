@@ -38,6 +38,15 @@ final class NIOSSHPTYClient {
         username: String,
         ed25519Key: Curve25519.Signing.PrivateKey
     ) async throws {
+        // Guard against being called twice without a disconnect in
+        // between. Without this, the previous group + connection
+        // would be silently overwritten and leak. Caller usually
+        // gates against re-entry via connectionStatus, but defensive
+        // here so we can't ever leak the underlying NIO group.
+        if group != nil || connection != nil {
+            log.warning("niossh: connect called with existing state; tearing down first")
+            await disconnect()
+        }
         log.info("niossh: connecting \(username, privacy: .public)@\(host, privacy: .public):\(port, privacy: .public)")
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
