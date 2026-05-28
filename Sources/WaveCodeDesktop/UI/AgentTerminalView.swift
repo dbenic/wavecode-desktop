@@ -20,6 +20,13 @@ import OSLog
 
 private let termLog = Logger(subsystem: "com.wavenetic.wavecode-desktop", category: "term")
 
+/// Debug helper — NSLog (not print or Logger) so output reaches both
+/// stderr (visible via `swift run ... 2>&1 | tee`) AND Console.app.
+/// Remove once the tiny-terminal bug is solved.
+@inline(__always) private func dlog(_ msg: String) {
+    NSLog("[wavecode-term] %@", msg)
+}
+
 struct AgentTerminalView: View {
     let agent: Agent
     @Environment(AppState.self) private var appState
@@ -170,7 +177,7 @@ private final class TerminalHostContainer: NSView {
 
     private func syncInnerFrame(source: String) {
         guard let term = terminalView else {
-            termLog.info("container \(source, privacy: .public): no terminalView yet, bounds=\(String(describing: self.bounds), privacy: .public)")
+            dlog("container \(source): no terminalView yet, bounds=\(bounds)")
             return
         }
         if term.frame != bounds {
@@ -179,7 +186,7 @@ private final class TerminalHostContainer: NSView {
             term.frame = bounds
             let afterC = term.getTerminal().cols
             let afterR = term.getTerminal().rows
-            termLog.info("container \(source, privacy: .public): set term.frame=\(String(describing: self.bounds), privacy: .public) cols/rows \(beforeC, privacy: .public)x\(beforeR, privacy: .public) -> \(afterC, privacy: .public)x\(afterR, privacy: .public)")
+            dlog("container \(source): term.frame=\(bounds) cols/rows \(beforeC)x\(beforeR) -> \(afterC)x\(afterR)")
         }
     }
 
@@ -426,20 +433,20 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
     /// useful to report.
     private func applyKnownSizeToSession(_ session: TerminalSession) {
         if let cols = pendingCols, let rows = pendingRows, cols > 1, rows > 1 {
-            termLog.info("applyKnownSize: pending \(cols, privacy: .public)x\(rows, privacy: .public)")
+            dlog("applyKnownSize: pending \(cols)x\(rows)")
             session.resize(cols: cols, rows: rows)
             pendingCols = nil
             pendingRows = nil
             return
         }
         if let term = terminalView?.getTerminal(), term.cols > 1, term.rows > 1 {
-            termLog.info("applyKnownSize: from terminal \(term.cols, privacy: .public)x\(term.rows, privacy: .public)")
+            dlog("applyKnownSize: from terminal \(term.cols)x\(term.rows)")
             session.resize(cols: term.cols, rows: term.rows)
         } else {
             let c = terminalView?.getTerminal().cols ?? -1
             let r = terminalView?.getTerminal().rows ?? -1
-            let bounds = terminalView?.bounds.size ?? .zero
-            termLog.info("applyKnownSize: nothing useful term.cols=\(c, privacy: .public) term.rows=\(r, privacy: .public) viewBounds=\(String(describing: bounds), privacy: .public)")
+            let viewBounds = terminalView?.bounds.size ?? .zero
+            dlog("applyKnownSize: nothing useful term.cols=\(c) term.rows=\(r) viewBounds=\(viewBounds)")
         }
     }
 
@@ -511,7 +518,7 @@ final class TerminalCoordinator: NSObject, TerminalViewDelegate {
         // this, the post-layout sizeChanged that fires after we kick
         // off openTerminalSession would be lost and the PTY would
         // remain at its tiny initial dimensions forever.
-        termLog.info("sizeChanged \(newCols, privacy: .public)x\(newRows, privacy: .public), session=\(self.session != nil ? "yes" : "no", privacy: .public)")
+        dlog("sizeChanged \(newCols)x\(newRows), session=\(session != nil ? "yes" : "no")")
         if let session = session {
             session.resize(cols: newCols, rows: newRows)
         } else {
